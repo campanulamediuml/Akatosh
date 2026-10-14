@@ -1,0 +1,16 @@
+# Python 代码执行沙箱。隔离全部由容器承担（见 docker-compose.yml 里 pybox 的
+# internal 网络 / read-only / tmpfs / 限额配置），镜像里只需要 Python 本体。
+FROM docker.m.daocloud.io/library/python:3.13-slim
+
+# 常用库预装：沙箱断网，模型写的代码 import 不了装不了的包。
+# numpy/matplotlib 是计算/绘图；sympy 是符号数学（公式推导/化简/解方程）；
+# pypdf/python-docx/openpyxl/chardet 是文档提取（用户上传的文件放 /files 只读挂载，模型自己读）。
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    numpy matplotlib sympy pypdf python-docx openpyxl chardet
+
+COPY sandbox/pybox.py /pybox.py
+
+# 非 root 运行（nobody）；可写目录只有 tmpfs 的 /tmp
+USER 65534:65534
+EXPOSE 8000
+CMD ["python", "/pybox.py"]

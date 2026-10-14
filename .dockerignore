@@ -1,0 +1,8 @@
+# 白名单模式：运行镜像只需要静态二进制和证书/时区数据，
+# 源码、node_modules、本地数据一律不进构建上下文
+*
+!ai-assistant-linux
+!.docker-assets
+!.docker-assets/**
+# pybox 沙箱镜像（Dockerfile.pybox）需要
+!sandbox/pybox.py

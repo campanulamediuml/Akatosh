@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      viewport-fit=cover   ：让页面铺到刘海/圆角区域，再用 env(safe-area-inset-*) 让开
+                             （不写这个的话安全区永远是 0，底部小白条会压住发送按钮）
+      interactive-widget   ：Android Chrome 弹键盘时把布局视口也缩小。
+                             不写的话布局视口不变，输入框会被键盘盖住（iOS 没这个开关，
+                             那边靠 visualViewport 兜底，见 App.vue 的 syncKeyboard）
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+
+    <meta name="color-scheme" content="dark light" />
+    <!-- PWA -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#16181d" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="apple-touch-icon" href="/icon-192.png" />
+    <title>AI 助手</title>
+    <script>
+      // 在首帧之前应用主题，避免白屏闪烁。
+      try {
+        var t = localStorage.getItem('ai-assistant-theme')
+        if (t !== 'dark' && t !== 'light') t = 'dark'
+        document.documentElement.setAttribute('data-theme', t)
+      } catch (e) {
+        document.documentElement.setAttribute('data-theme', 'dark')
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

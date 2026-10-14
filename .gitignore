@@ -1,0 +1,14 @@
+# 运行时数据（含 API Key，绝不要提交）
+/data/
+/data-*/
+/misc/
+/misc-*/
+
+# 构建产物
+*.exe
+/web/node_modules/
+/web/dist/
+
+# 测试脚本产出的抓包文件
+/sse-capture.txt
+/tools/.last-conv-id
