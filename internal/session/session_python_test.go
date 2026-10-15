@@ -78,13 +78,13 @@ func TestPythonToolLoop(t *testing.T) {
 	t.Cleanup(pybox.Close)
 	mgr.WithSandbox(sandbox.New(pybox.URL))
 
-	conv, err := st.CreateConversation("python 测试", 0, "", "")
+	conv, err := st.CreateConversation(1, "python 测试", 0, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Python 工具没有会话级开关：配了沙箱就全局可用，模型自主决定调不调
 
-	if _, _, err := mgr.SendMessage(context.Background(), conv.ID, "6 乘以 7 是多少？用代码算", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(context.Background(), 1, conv.ID, "6 乘以 7 是多少？用代码算", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	state := waitIdle(t, mgr, conv.ID)
@@ -116,11 +116,11 @@ func TestPythonUnavailableWithoutSandbox(t *testing.T) {
 	up := pythonUpstream(t, gotTools)
 	mgr, st := newTestManager(t, up.URL) // 不注入 sandbox
 
-	conv, err := st.CreateConversation("普通会话", 0, "", "")
+	conv, err := st.CreateConversation(1, "普通会话", 0, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := mgr.SendMessage(context.Background(), conv.ID, "你好", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(context.Background(), 1, conv.ID, "你好", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitIdle(t, mgr, conv.ID)

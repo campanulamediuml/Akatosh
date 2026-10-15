@@ -1,11 +1,13 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"net/http"
 	"strings"
+
+	"aiassistant/internal/store"
 )
 
 // 访问令牌的三条通路，按优先级：
@@ -21,12 +23,14 @@ import (
 // 注意 cookie **不能带 Secure**：局域网是明文 http，带 Secure 的 cookie 浏览器
 // 根本不会存，手机这条路会直接断掉。这是“内网明文 + 长期 cookie”的自觉取舍，
 // 所以令牌只应该在内网用，且不要和别的服务复用。
+//
+// 多租户：令牌存在数据库 users 表（SHA-256 哈希），一个令牌一个用户。
 const (
 	tokenCookie = "ai_token"
 	tokenHeader = "X-Auth-Token"
 	// 一年。手机上“添加到主屏幕”之后要长期有效，否则体验还不如不设。
 	tokenCookieMaxAge = 365 * 24 * 3600
-	// 令牌长度上限，防止有人拿超长字符串来撞 ConstantTimeCompare
+	// 令牌长度上限，防止有人拿超长字符串来撞库
 	tokenMaxLen = 256
 )
 
@@ -35,56 +39,60 @@ func GenerateToken() string {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		// crypto/rand 失败在正常系统上不可能发生；真发生了也不能退化成弱随机，
-		// 宁可返回空串让调用方把鉴权当关闭处理并告警。
+		// 宁可返回空串让调用方告警。
 		return ""
 	}
 	return hex.EncodeToString(b)
 }
 
-// tokenEnabled 是否启用了鉴权。令牌为空 = 不鉴权（默认行为，保持向后兼容）。
-func (s *Server) tokenEnabled() bool {
-	return strings.TrimSpace(s.token) != ""
+// ctxKeyUser 是 *store.User 在 request.Context 里的键。
+type ctxKeyUser struct{}
+
+// userOf 取出当前请求对应的用户（requireToken 已经保证它存在）。
+func userOf(r *http.Request) *store.User {
+	u, _ := r.Context().Value(ctxKeyUser{}).(*store.User)
+	return u
 }
 
-// tokenMatches 常量时间比较，避免用响应时间把令牌一位一位试出来。
-func (s *Server) tokenMatches(v string) bool {
-	want := strings.TrimSpace(s.token)
-	v = strings.TrimSpace(v)
-	if want == "" || v == "" {
-		return false
-	}
-	if len(v) > tokenMaxLen || len(want) != len(v) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(want), []byte(v)) == 1
-}
-
-// tokenFromRequest 依次尝试 cookie / Authorization / X-Auth-Token / query。
-func (s *Server) tokenFromRequest(r *http.Request) (string, bool) {
-	if c, err := r.Cookie(tokenCookie); err == nil && s.tokenMatches(c.Value) {
-		return c.Value, true
+// rawTokenFromRequest 按优先级取原始令牌（cookie / Authorization / X-Auth-Token / query），
+// 不校验。校验在 resolveUser 里统一做（查库）。
+func rawTokenFromRequest(r *http.Request) string {
+	if c, err := r.Cookie(tokenCookie); err == nil && strings.TrimSpace(c.Value) != "" {
+		return strings.TrimSpace(c.Value)
 	}
 	if h := r.Header.Get("Authorization"); h != "" {
-		if v, ok := strings.CutPrefix(h, "Bearer "); ok && s.tokenMatches(strings.TrimSpace(v)) {
-			return strings.TrimSpace(v), true
+		if v, ok := strings.CutPrefix(h, "Bearer "); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
 		}
 	}
-	if v := r.Header.Get(tokenHeader); s.tokenMatches(strings.TrimSpace(v)) {
-		return strings.TrimSpace(v), true
+	if v := strings.TrimSpace(r.Header.Get(tokenHeader)); v != "" {
+		return v
 	}
-	if v := r.URL.Query().Get("token"); s.tokenMatches(v) {
-		return v, true
+	if v := strings.TrimSpace(r.URL.Query().Get("token")); v != "" {
+		return v
 	}
-	return "", false
+	return ""
 }
 
-// requireToken 只守 /api/*。
+// resolveUser 把原始令牌解析成用户：哈希后查 users 表。
+func (s *Server) resolveUser(raw string) *store.User {
+	if raw == "" || len(raw) > tokenMaxLen {
+		return nil
+	}
+	u, err := s.st.UserByTokenHash(store.HashToken(raw))
+	if err != nil {
+		return nil
+	}
+	return u
+}
+
+// requireToken 只守 /api/*：校验令牌并把用户注入请求上下文。
 //
 // 静态资源必须放行，否则连“输入令牌”那个界面自己都加载不出来——页面是 JS 渲染的，
 // 把 index.html 和 assets 也拦掉就成了死锁。
 func (s *Server) requireToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.tokenEnabled() || !strings.HasPrefix(r.URL.Path, "/api/") {
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -94,12 +102,25 @@ func (s *Server) requireToken(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if _, ok := s.tokenFromRequest(r); ok {
-			next.ServeHTTP(w, r)
+		u := s.resolveUser(rawTokenFromRequest(r))
+		if u == nil {
+			writeErr(w, http.StatusUnauthorized, "unauthorized", "需要访问令牌")
 			return
 		}
-		writeErr(w, http.StatusUnauthorized, "unauthorized", "需要访问令牌")
+		// last_seen 节流刷新：每个用户每分钟最多写一次库
+		s.touchUserThrottled(u.ID)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKeyUser{}, u)))
 	})
+}
+
+// requireAdmin 要求当前用户是管理员（用户管理接口用）。必须在 requireToken 之后调用。
+func requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	u := userOf(r)
+	if u == nil || !u.IsAdmin {
+		writeErr(w, http.StatusForbidden, "forbidden", "需要管理员权限")
+		return false
+	}
+	return true
 }
 
 // bootstrapToken 处理「拿 URL 里的令牌换一个长期 cookie」这个一次性动作。
@@ -111,12 +132,12 @@ func (s *Server) requireToken(next http.Handler) http.Handler {
 func (s *Server) bootstrapToken(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 只管文档导航（非 /api/*）；API 请求带 ?token= 直接在 requireToken 里放行
-		if !s.tokenEnabled() || r.Method != http.MethodGet || strings.HasPrefix(r.URL.Path, "/api/") {
+		if r.Method != http.MethodGet || strings.HasPrefix(r.URL.Path, "/api/") {
 			next.ServeHTTP(w, r)
 			return
 		}
 		raw := r.URL.Query().Get("token")
-		if raw == "" || !s.tokenMatches(raw) {
+		if raw == "" || s.resolveUser(raw) == nil {
 			// 令牌不对也照常放行：页面会加载出来，API 会 401，
 			// 前端据此弹出“输入访问令牌”，比白屏友好得多。
 			next.ServeHTTP(w, r)

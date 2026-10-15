@@ -59,7 +59,7 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-const schemaVersion = 11
+const schemaVersion = 12
 
 func (s *Store) migrate() error {
 	var ver int
@@ -193,8 +193,61 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// v12：多租户（users 表 + 各业务表 user_id + 按用户的 user_settings）
+	if err := s.migrateToV12(); err != nil {
+		return err
+	}
+
 	if _, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
 		return fmt.Errorf("写入 schema 版本失败: %w", err)
+	}
+	return nil
+}
+
+// migrateToV12 多租户改造：
+//   - users 表：令牌哈希 + 管理员标记（见 users.go）
+//   - conversations / providers / files / attachments 加 user_id（0 = 待认领，
+//     首次启动时由 BootstrapUsers 统一划给首个管理员）
+//   - user_settings 按用户的键值表，替代单租户的全局 settings 表
+//     （旧 settings 表保留不删，BootstrapUsers 把内容搬进 user_settings）
+func (s *Store) migrateToV12() error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS users (
+			id           INTEGER PRIMARY KEY AUTOINCREMENT,
+			name         TEXT    NOT NULL DEFAULT '',
+			token_hash   TEXT    NOT NULL UNIQUE,
+			is_admin     INTEGER NOT NULL DEFAULT 0,
+			created_at   INTEGER NOT NULL,
+			last_seen_at INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE TABLE IF NOT EXISTS user_settings (
+			user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			k       TEXT    NOT NULL,
+			v       TEXT    NOT NULL DEFAULT '',
+			PRIMARY KEY (user_id, k)
+		)`,
+	}
+	for _, q := range stmts {
+		if _, err := s.db.Exec(q); err != nil {
+			return fmt.Errorf("迁移到 v12 失败: %w\nSQL: %s", err, q)
+		}
+	}
+	// 加列：老库可能已经加过（手工或上次中断），重复列错误吞掉
+	for _, table := range []string{"conversations", "providers", "files", "attachments"} {
+		if _, err := s.db.Exec(
+			fmt.Sprintf(`ALTER TABLE %s ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0`, table)); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column") {
+				return fmt.Errorf("迁移到 v12 失败（%s.user_id）: %w", table, err)
+			}
+		}
+	}
+	for _, idx := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_providers_user ON providers(user_id)`,
+	} {
+		if _, err := s.db.Exec(idx); err != nil {
+			return fmt.Errorf("迁移到 v12 失败: %w", err)
+		}
 	}
 	return nil
 }
@@ -233,7 +286,10 @@ func (s *Store) migrateToV10() error {
 // 空串 = 老消息/没调工具——那些仍走 search_log 摘要 + 生图重建的老路。
 func (s *Store) migrateToV11() error {
 	if _, err := s.db.Exec(`ALTER TABLE messages ADD COLUMN tool_rounds TEXT NOT NULL DEFAULT ''`); err != nil {
-		return fmt.Errorf("迁移到 v11 失败: %w", err)
+		// 列已存在就当迁移过了：schemaVersion 升级会触发全量重跑，幂等是硬要求
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("迁移到 v11 失败: %w", err)
+		}
 	}
 	return nil
 }
@@ -389,11 +445,13 @@ func (s *Store) migrateToV3() error {
 	if affected, _ := res.RowsAffected(); affected > 0 {
 		log.Printf("[migrate] 已把 %d 个已有会话绑定到默认供应商", affected)
 	}
-	// 顺手把默认供应商也记住（老部署只有一家，就是它）
-	if v, _ := s.GetSetting(SettingDefaultProvider); v == "" {
+	// 顺手把默认供应商也记住（老部署只有一家，就是它）。
+	// userID=0：这是单租户时代的迁移，写的是全局 settings 表，
+	// v12 引导时再由 BootstrapUsers 整体搬进首个管理员的 user_settings。
+	if v, _ := s.GetSetting(0, SettingDefaultProvider); v == "" {
 		var id int64
 		if err := s.db.QueryRow(`SELECT id FROM providers ORDER BY id LIMIT 1`).Scan(&id); err == nil {
-			_ = s.SetSetting(SettingDefaultProvider, fmt.Sprintf("%d", id))
+			_ = s.SetSetting(0, SettingDefaultProvider, fmt.Sprintf("%d", id))
 		}
 	}
 	return nil
@@ -416,18 +474,33 @@ func (s *Store) MarkInterrupted() (int64, error) {
 
 // ---------- settings ----------
 
-func (s *Store) GetSetting(key string) (string, error) {
+// GetSetting 读某个用户的设置项（user_settings 表，按用户隔离）。
+// userID <= 0 时读单租户时代的全局 settings 表（仅供迁移期代码使用）。
+func (s *Store) GetSetting(userID int64, key string) (string, error) {
 	var v string
-	err := s.db.QueryRow(`SELECT v FROM settings WHERE k = ?`, key).Scan(&v)
+	var err error
+	if userID > 0 {
+		err = s.db.QueryRow(`SELECT v FROM user_settings WHERE user_id = ? AND k = ?`, userID, key).Scan(&v)
+	} else {
+		err = s.db.QueryRow(`SELECT v FROM settings WHERE k = ?`, key).Scan(&v)
+	}
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
 	return v, err
 }
 
-func (s *Store) SetSetting(key, value string) error {
+// SetSetting 写设置项。userID <= 0 时写单租户时代的全局 settings 表
+// （仅迁移期代码使用——v3 回填默认供应商在 users 表还不存在时就要写）。
+func (s *Store) SetSetting(userID int64, key, value string) error {
+	if userID <= 0 {
+		_, err := s.db.Exec(
+			`INSERT INTO settings(k, v) VALUES(?, ?)
+			 ON CONFLICT(k) DO UPDATE SET v = excluded.v`, key, value)
+		return err
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO settings(k, v) VALUES(?, ?)
-		 ON CONFLICT(k) DO UPDATE SET v = excluded.v`, key, value)
+		`INSERT INTO user_settings(user_id, k, v) VALUES(?, ?, ?)
+		 ON CONFLICT(user_id, k) DO UPDATE SET v = excluded.v`, userID, key, value)
 	return err
 }

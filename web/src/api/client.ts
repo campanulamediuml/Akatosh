@@ -18,6 +18,7 @@ import type {
   DefaultsInput,
   EditMessageInput,
   Health,
+  Me,
   Message,
   Model,
   Provider,
@@ -31,6 +32,7 @@ import type {
   UpdateProviderInput,
   UploadedFile,
   UploadResponse,
+  UserInfo,
 } from './types'
 
 /* ------------------------------------------------------------------ */
@@ -374,6 +376,15 @@ export async function uploadFiles(
 export const api = {
   health: (options?: RequestOptions) => http.get<Health>('/api/health', options),
 
+  /* 当前用户 / 用户管理（管理员） */
+  getMe: (options?: RequestOptions) => http.get<Me>('/api/me', options),
+  listUsers: (options?: RequestOptions) => http.get<UserInfo[]>('/api/users', options),
+  createUser: (name: string, options?: RequestOptions) =>
+    http.post<{ user: UserInfo; token: string }>('/api/users', { name }, options),
+  rotateUserToken: (id: number, options?: RequestOptions) =>
+    http.post<{ token: string }>(`/api/users/${id}/token`, undefined, options),
+  deleteUser: (id: number, options?: RequestOptions) => http.delete<void>(`/api/users/${id}`, options),
+
   /* 那条唯一的 SSE 长连接 */
   streamUrl: () => '/api/stream',
 
@@ -419,8 +430,12 @@ export const api = {
     http.post<Conversation>('/api/conversations', input, options),
   patchConversation: (id: number, input: UpdateConversationInput, options?: RequestOptions) =>
     http.patch<{ conv: Conversation }>(`/api/conversations/${id}`, input, options),
-  forkConversation: (id: number, options?: RequestOptions) =>
-    http.post<{ conv: Conversation }>(`/api/conversations/${id}/fork`, undefined, options),
+  forkConversation: (id: number, beforeMessageID?: number, options?: RequestOptions) =>
+    http.post<{ conv: Conversation }>(
+      `/api/conversations/${id}/fork`,
+      beforeMessageID ? { before_message_id: beforeMessageID } : undefined,
+      options,
+    ),
 
   /** 手动压缩上下文：ack 即返回，进度走 SSE（conv.compacting + notice） */
   compactConversation: (id: number, options?: RequestOptions) =>

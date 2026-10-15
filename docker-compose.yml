@@ -1,0 +1,87 @@
+# AI 助手 + SearXNG（联网搜索后端）的完整部署。
+#
+#   docker compose up -d        # 启动 / 重建后重启
+#
+# 令牌从同目录 .env 读取（AI_TOKEN=...）。
+# 镜像在本地构建/标记：ai-assistant:1.0.0（go build + docker build）、
+# searxng:latest（docker.m.daocloud.io/searxng/searxng 拉取后 tag）。
+services:
+  searxng:
+    image: searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    volumes:
+      - /data/searxng:/etc/searxng:ro
+    ports:
+      # 只绑回环：供宿主机调试用；ai-assistant 走内部网络访问，不对外暴露
+      - "127.0.0.1:18084:8080"
+
+  ai-assistant:
+    image: ai-assistant:1.0.0
+    container_name: ai-assistant
+    restart: unless-stopped
+    depends_on:
+      - searxng
+    networks:
+      - default      # ai-net：出网（调 LLM 上游）
+      - sandbox-net  # 调 pybox（internal，沙箱出不了网）
+    ports:
+      # 只绑回环：公网入口是外层 TLS 终结（your-domain.example → 18083）
+      - "127.0.0.1:18083:28888"
+    volumes:
+      - /data/ai_assist/data:/app/data
+      - /data/ai_assist/misc:/app/misc
+    command:
+      - "-addr"
+      - "0.0.0.0:28888"
+      - "-data"
+      - "/app/data"
+      - "-misc"
+      - "/app/misc"
+      - "-token"
+      - "${AI_TOKEN:?请在 .env 里设置 AI_TOKEN}"
+      - "-allow-host"
+      - "your-domain.example"
+      - "-searxng"
+      - "http://searxng:8080"
+      - "-pybox"
+      - "http://pybox:8000"
+      - "-imagegen"
+      - "${IMAGEGEN:-}"
+      - "-compact-threshold"
+      - "0.3"
+
+  # Python 代码执行沙箱：隔离全部由这里承担——
+  # internal 网络（物理断网）、只读根 fs、tmpfs /tmp、内存/CPU/PID 限额、
+  # 非 root（Dockerfile 里 USER nobody）、no-new-privileges、drop 全部 capabilities。
+  # 模型写的代码是不受信代码，这些一道都不能省。
+  pybox:
+    image: pybox:1.0.0
+    container_name: pybox
+    restart: unless-stopped
+    networks:
+      - sandbox-net
+    # 不做端口映射：internal 网络的端口映射本就不生效（也没有暴露的必要），
+    # 宿主机调试用 docker exec pybox python -c '...' 直连 127.0.0.1:8000
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    volumes:
+      # 用户上传的文件：只读挂载，模型自己用 Python 读（pypdf/docx/openpyxl 已预装）
+      - /data/ai_assist/misc/files:/files:ro
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  default:
+    # 网络由部署时手动创建（docker network create ai-net），不由 compose 管理
+    name: ai-net
+    external: true
+  # internal = 没有出网路由：pybox 里的代码连不了任何外网
+  sandbox-net:
+    internal: true

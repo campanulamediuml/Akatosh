@@ -130,7 +130,7 @@ func (t *Titler) Generate(convID int64, expectedTitle string, cli *llm.Client, m
 		// 否则前端会把这个正在生成的会话的转圈标记误清掉。
 		updated.Generating = t.isGenerating != nil && t.isGenerating(convID)
 		log.Printf("[title] 会话 %d 标题已生成: %q", convID, title)
-		t.bus.Publish(EventConv, func(seq int64) any {
+		t.bus.Publish(EventConv, conv.UserID, func(seq int64) any {
 			return ConvPayload{Seq: seq, ConvID: convID, Action: ActionUpdated, Conv: updated}
 		})
 	}()

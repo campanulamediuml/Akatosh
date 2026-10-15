@@ -85,20 +85,21 @@ func TestReadAttachmentSendsImageUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 	att, err := st.CreateAttachment(store.Attachment{
-		Hash: saved.Hash, Kind: "image", MIME: saved.MIME, Ext: saved.Ext,
+		UserID: 1,
+		Hash:   saved.Hash, Kind: "image", MIME: saved.MIME, Ext: saved.Ext,
 		Name: "g.png", Size: saved.Size, Width: saved.Width, Height: saved.Height,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	pa, err := st.CreateProvider("p", up.URL+"/v1", "k")
+	pa, err := st.CreateProvider(1, "p", up.URL+"/v1", "k")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, _ = st.UpsertModels(pa.ID, []store.Model{{ModelID: "m", Reasoning: false, Efforts: []string{}}})
 
-	mgr := NewManagerWithMedia(st, NewBus(), func(providerID int64) (*llm.Client, error) {
+	mgr := NewManagerWithMedia(st, NewBus(), func(userID, providerID int64) (*llm.Client, error) {
 		p, err := st.GetProviderByID(providerID)
 		if err != nil {
 			return nil, err
@@ -111,7 +112,7 @@ func TestReadAttachmentSendsImageUpstream(t *testing.T) {
 		mgr.Shutdown(ctx)
 	})
 
-	conv, err := st.CreateConversation("t", pa.ID, "m", "")
+	conv, err := st.CreateConversation(1, "t", pa.ID, "m", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +123,7 @@ func TestReadAttachmentSendsImageUpstream(t *testing.T) {
 	if err := st.AttachToMessage(asst.ID, []int64{att.ID}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := mgr.SendMessage(context.Background(), conv.ID, "回看一下刚画的图", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(context.Background(), 1, conv.ID, "回看一下刚画的图", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitIdle(t, mgr, conv.ID)

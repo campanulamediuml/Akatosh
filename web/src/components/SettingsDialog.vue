@@ -253,6 +253,78 @@ const effortHint = computed(() => {
 })
 
 /* ------------------------------------------------------------------ */
+/* 用户管理（仅管理员可见）                                              */
+/* ------------------------------------------------------------------ */
+
+const newUserName = ref('')
+const creatingUser = ref(false)
+/** 刚创建/重置出来的明文令牌：只显示一次，关闭或下次操作后清除 */
+const freshToken = ref<{ label: string; token: string } | null>(null)
+const confirmUserDeleteId = ref<number | null>(null)
+const rotatingUserId = ref<number | null>(null)
+const deletingUserId = ref<number | null>(null)
+
+async function onCreateUser(): Promise<void> {
+  const name = newUserName.value.trim()
+  if (!name || creatingUser.value) return
+  creatingUser.value = true
+  try {
+    const token = await settings.createUser(name)
+    if (token) {
+      freshToken.value = { label: name, token }
+      newUserName.value = ''
+    }
+  } finally {
+    creatingUser.value = false
+  }
+}
+
+async function onRotateUserToken(id: number, name: string): Promise<void> {
+  if (rotatingUserId.value !== null) return
+  rotatingUserId.value = id
+  try {
+    const token = await settings.rotateToken(id)
+    if (token) freshToken.value = { label: name, token }
+  } finally {
+    rotatingUserId.value = null
+  }
+}
+
+function askDeleteUser(id: number): void {
+  confirmUserDeleteId.value = confirmUserDeleteId.value === id ? null : id
+}
+
+async function doDeleteUser(id: number): Promise<void> {
+  confirmUserDeleteId.value = null
+  deletingUserId.value = id
+  try {
+    await settings.deleteUser(id)
+  } finally {
+    deletingUserId.value = null
+  }
+}
+
+/** 复制一次性令牌（完整登录链接比裸令牌更好用） */
+async function copyFreshToken(withLink: boolean): Promise<void> {
+  if (!freshToken.value) return
+  const text = withLink
+    ? `${location.origin}/?token=${freshToken.value.token}`
+    : freshToken.value.token
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    // 剪贴板不可用时退化为让用户手选
+  }
+}
+
+function fmtTime(ms: number): string {
+  if (!ms) return '从未'
+  const d = new Date(ms)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+/* ------------------------------------------------------------------ */
 /* 生命周期                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -266,6 +338,10 @@ watch(
     settings.clearOpResults()
     if (!settings.loaded) void settings.load()
     else void settings.reload()
+    // 用户管理：管理员才拉（普通用户入口都看不到）
+    freshToken.value = null
+    confirmUserDeleteId.value = null
+    if (settings.isAdmin) void settings.loadUsers()
   },
 )
 
@@ -618,6 +694,95 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onDocKeydown))
               <div class="hint">新建会话时自动带上；已有会话不受影响（会话级的在侧栏「⋯」菜单里改）。</div>
             </div>
           </template>
+        </section>
+
+        <!-- 用户管理：仅管理员可见。每个用户一个令牌，数据（供应商/会话/附件）完全隔离 -->
+        <section v-if="settings.isAdmin" class="fieldset">
+          <h3 class="fieldset__title">用户管理</h3>
+          <p class="hint" style="margin: 0 0 10px">
+            每个用户一个访问令牌，各自的供应商、API Key、会话完全隔离。令牌只存哈希，明文只在创建/重置这一刻显示一次。
+          </p>
+
+          <!-- 一次性令牌：创建/重置成功后必须当场复制 -->
+          <div v-if="freshToken" class="notice notice--success" style="margin-bottom: 10px">
+            <div>
+              「{{ freshToken.label }}」的访问令牌（只显示这一次，请立即复制）：
+              <code class="token-code">{{ freshToken.token }}</code>
+            </div>
+            <div style="margin-top: 6px; display: flex; gap: 8px">
+              <button type="button" class="btn btn--sm" @click="copyFreshToken(false)">复制令牌</button>
+              <button type="button" class="btn btn--sm btn--primary" @click="copyFreshToken(true)">复制登录链接</button>
+            </div>
+          </div>
+
+          <div class="prov" v-for="u in settings.users" :key="u.id">
+            <div class="prov__head">
+              <div class="prov__info">
+                <div class="prov__name">
+                  {{ u.name }}
+                  <span v-if="u.is_admin" class="tag tag--ok">管理员</span>
+                  <span v-if="u.id === settings.me?.id" class="tag">我</span>
+                </div>
+                <div class="prov__meta">最近活跃：{{ fmtTime(u.last_seen_at) }}</div>
+              </div>
+              <div class="prov__actions">
+                <button
+                  type="button"
+                  class="btn btn--sm"
+                  :disabled="rotatingUserId !== null"
+                  title="旧令牌立即失效，新令牌只显示一次"
+                  @click="onRotateUserToken(u.id, u.name)"
+                >
+                  {{ rotatingUserId === u.id ? '重置中…' : '重置令牌' }}
+                </button>
+                <button
+                  v-if="u.id !== settings.me?.id"
+                  type="button"
+                  class="btn btn--sm btn--danger"
+                  @click="askDeleteUser(u.id)"
+                >
+                  删除
+                </button>
+              </div>
+            </div>
+            <!-- 删除二次确认 -->
+            <div v-if="confirmUserDeleteId === u.id" class="notice notice--error" style="margin-top: 8px">
+              删除「{{ u.name }}」将一并删除其全部会话、供应商和上传的文件，且令牌立即失效。确定？
+              <div style="margin-top: 6px; display: flex; gap: 8px">
+                <button
+                  type="button"
+                  class="btn btn--sm btn--danger"
+                  :disabled="deletingUserId !== null"
+                  @click="doDeleteUser(u.id)"
+                >
+                  {{ deletingUserId === u.id ? '删除中…' : '确认删除' }}
+                </button>
+                <button type="button" class="btn btn--sm" @click="confirmUserDeleteId = null">取消</button>
+              </div>
+            </div>
+          </div>
+          <div v-if="settings.users.length === 0 && !settings.loadingUsers" class="hint">还没有其他用户</div>
+
+          <!-- 新建用户 -->
+          <div style="display: flex; gap: 8px; margin-top: 10px">
+            <input
+              v-model="newUserName"
+              type="text"
+              class="input"
+              style="flex: 1"
+              placeholder="新用户的名字（如：小明）"
+              maxlength="32"
+              @keydown.enter="onCreateUser"
+            />
+            <button
+              type="button"
+              class="btn btn--primary btn--sm"
+              :disabled="!newUserName.trim() || creatingUser"
+              @click="onCreateUser"
+            >
+              {{ creatingUser ? '创建中…' : '创建用户' }}
+            </button>
+          </div>
         </section>
       </div>
 

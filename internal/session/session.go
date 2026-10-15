@@ -361,7 +361,7 @@ func (s *Session) handleSend(cmd command) (result, error) {
 	if err != nil {
 		return result{}, err
 	}
-	cli, err := s.mgr.clientFor(ref.ProviderID)
+	cli, err := s.mgr.clientFor(s.ownerID(), ref.ProviderID)
 	if err != nil {
 		return result{}, err
 	}
@@ -387,16 +387,26 @@ func (s *Session) handleSend(cmd command) (result, error) {
 	if err != nil {
 		return result{}, newErr("internal", "保存消息失败: "+err.Error())
 	}
-	// 把这一轮带的图片挂上去（id 是上传接口返回的）
+	// 把这一轮带的图片挂上去（id 是上传接口返回的）。
+	// 多租户：附件必须属于本会话属主（本人上传的，或哈希去重共享后已挂在本人
+	// 会话上的），否则挂别人的附件进来、之后就能通过附件 URL 读到内容。
 	if len(cmd.attachmentIDs) > 0 {
+		if owned, err := s.mgr.st.CountAttachmentsOwnedBy(cmd.attachmentIDs, s.ownerID()); err != nil || owned != len(cmd.attachmentIDs) {
+			log.Printf("[session %d] 附件挂载被拒绝：%d 个附件 id 中有不属于用户 #%d 的", s.convID, len(cmd.attachmentIDs), s.ownerID())
+			return result{}, newErr("bad_request", "附件不存在或无权使用")
+		}
 		if err := s.mgr.st.AttachToMessage(userMsg.ID, cmd.attachmentIDs); err != nil {
 			log.Printf("[session %d] 附件挂载失败（消息仍会发出，但不带图）: %v", s.convID, err)
 		} else if full, err := s.mgr.st.GetMessageWithAttachments(userMsg.ID); err == nil && full != nil {
 			userMsg = full
 		}
 	}
-	// 把这一轮带的文件挂上去（id 是 /api/files 返回的）
+	// 把这一轮带的文件挂上去（id 是 /api/files 返回的，同样的归属校验）
 	if len(cmd.fileIDs) > 0 {
+		if owned, err := s.mgr.st.CountFilesOwnedBy(cmd.fileIDs, s.ownerID()); err != nil || owned != len(cmd.fileIDs) {
+			log.Printf("[session %d] 文件挂载被拒绝：%d 个文件 id 中有不属于用户 #%d 的", s.convID, len(cmd.fileIDs), s.ownerID())
+			return result{}, newErr("bad_request", "文件不存在或无权使用")
+		}
 		if err := s.mgr.st.AttachFileToMessage(userMsg.ID, cmd.fileIDs); err != nil {
 			log.Printf("[session %d] 文件挂载失败（消息仍会发出，但不带文件）: %v", s.convID, err)
 		}
@@ -444,7 +454,7 @@ func (s *Session) handleCompact() (result, error) {
 		s.mgr.setCompacting(s.convID, false)
 		// runCompact 成功时自己会广播；提前返回（消息太少不值得压）时不会，
 		// 统一在这里再广播一次解除前端的「压缩中」状态
-		s.mgr.bus.Publish(EventConv, func(seq int64) any {
+		s.mgr.bus.Publish(EventConv, s.ownerID(), func(seq int64) any {
 			conv, err := s.mgr.st.GetConversation(s.convID)
 			if err != nil || conv == nil {
 				return ConvPayload{Seq: seq, ConvID: s.convID, Action: ActionUpdated}
@@ -487,7 +497,7 @@ func (s *Session) handleRegenerate(cmd command) (result, error) {
 	if err != nil {
 		return result{}, err
 	}
-	cli, err := s.mgr.clientFor(ref.ProviderID)
+	cli, err := s.mgr.clientFor(s.ownerID(), ref.ProviderID)
 	if err != nil {
 		return result{}, err
 	}
@@ -751,9 +761,17 @@ func (s *Session) startStream(gen *generation, cli *llm.Client) {
 	}()
 }
 
+// ownerID 返回本会话属主的 user id：多租户下所有供应商/设置解析都按它隔离。
+func (s *Session) ownerID() int64 {
+	if s.conv == nil {
+		return 0
+	}
+	return s.conv.UserID
+}
+
 // providerName 只用于日志。
 func (s *Session) providerName(providerID int64) string {
-	p, err := s.mgr.st.ResolveProvider(providerID)
+	p, err := s.mgr.st.ResolveProvider(s.ownerID(), providerID)
 	if err != nil || p == nil {
 		return "?"
 	}
@@ -1051,7 +1069,7 @@ func (s *Session) onToolResult(tr toolExecResult) {
 		})
 		log.Printf("[gen] 会话 %d 工具调用达上限（%d 轮），转为强制收尾", s.convID, g.toolRounds)
 	}
-	cli, err := s.mgr.clientFor(g.providerID)
+	cli, err := s.mgr.clientFor(s.ownerID(), g.providerID)
 	if err != nil {
 		s.finishGeneration(store.StatusError, err.Error())
 		return
@@ -1119,7 +1137,7 @@ func (s *Session) finishGeneration(status, errMsg string) {
 		}
 		convID := s.convID
 		text := fmt.Sprintf("「%s」生成失败：%s", title, errMsg)
-		s.lastSeq = s.mgr.bus.Publish(EventNotice, func(seq int64) any {
+		s.lastSeq = s.mgr.bus.Publish(EventNotice, s.ownerID(), func(seq int64) any {
 			return NoticePayload{Seq: seq, ConvID: convID, Level: "error", Text: text}
 		})
 	}
@@ -1148,7 +1166,7 @@ func (s *Session) finishGeneration(status, errMsg string) {
 // startTitleGeneration 在后台请模型起一个更好的标题来覆盖本地截断的那个。
 // 失败/超时都只是打条日志，界面上仍然是本地标题，不会出现空白名。
 func (s *Session) startTitleGeneration(reply, expectedTitle string, providerID int64, modelID string) {
-	cli, err := s.mgr.clientFor(providerID)
+	cli, err := s.mgr.clientFor(s.ownerID(), providerID)
 	if err != nil {
 		return
 	}
@@ -1203,7 +1221,7 @@ func (s *Session) resolveRef(wantProvider int64, wantModel string, wantEffort st
 	}
 	// 供应商可能已被删除/从未配置：交给 store 兜底（回退默认供应商），
 	// 兜不到就会得到 no_provider。
-	prov, err := s.mgr.st.ResolveProvider(pid)
+	prov, err := s.mgr.st.ResolveProvider(s.ownerID(), pid)
 	if err != nil {
 		return modelRef{}, newErr("internal", err.Error())
 	}
@@ -1220,7 +1238,7 @@ func (s *Session) resolveRef(wantProvider int64, wantModel string, wantEffort st
 	}
 	if mid == "" {
 		// 设置里的默认模型（必须确实属于这家，否则会发错地方）
-		if v, _ := s.mgr.st.GetSetting(store.SettingDefaultModel); v != "" {
+		if v, _ := s.mgr.st.GetSetting(s.ownerID(), store.SettingDefaultModel); v != "" {
 			if m, err := s.mgr.st.GetModelFor(pid, v); err == nil && m != nil {
 				mid = v
 			}
@@ -1256,7 +1274,7 @@ func (s *Session) resolveEffort(providerID int64, modelID, want string, wantSet 
 	if s.conv != nil && s.conv.Effort != "" {
 		return s.conv.Effort
 	}
-	if v, err := s.mgr.st.GetSetting(store.SettingDefaultEffort); err == nil && v != "" {
+	if v, err := s.mgr.st.GetSetting(s.ownerID(), store.SettingDefaultEffort); err == nil && v != "" {
 		return v
 	}
 	return store.DefaultEffort
@@ -1292,7 +1310,7 @@ func (s *Session) buildHistory(modelID string) []llm.ChatMessage {
 	}
 	// 全局默认 system prompt（设置里的「默认系统提示词」）：注入式——每轮现读，
 	// 改设置立即影响所有会话（旧语义「创建时复制」已废弃，避免和注入重复）。
-	if v, _ := s.mgr.st.GetSetting(store.SettingDefaultSystemPrompt); strings.TrimSpace(v) != "" {
+	if v, _ := s.mgr.st.GetSetting(s.ownerID(), store.SettingDefaultSystemPrompt); strings.TrimSpace(v) != "" {
 		out = append(out, llm.ChatMessage{Role: store.RoleSystem, Content: v})
 	}
 	// 时间提示放最后（它天天变，放最前反而打扰前缀缓存的稳定段）。
@@ -1547,7 +1565,7 @@ func hasUserMessage(msgs []llm.ChatMessage) bool {
 
 func (s *Session) publishDelta(msgID int64, channel, text string) {
 	convID := s.convID
-	s.lastSeq = s.mgr.bus.Publish(EventDelta, func(seq int64) any {
+	s.lastSeq = s.mgr.bus.Publish(EventDelta, s.ownerID(), func(seq int64) any {
 		return DeltaPayload{Seq: seq, ConvID: convID, MessageID: msgID, Channel: channel, Text: text}
 	})
 }
@@ -1586,7 +1604,7 @@ func (s *Session) publishMessage(action string, m *store.Message, explicitID ...
 	} else if len(explicitID) > 0 {
 		msgID = explicitID[0]
 	}
-	s.lastSeq = s.mgr.bus.Publish(EventMessage, func(seq int64) any {
+	s.lastSeq = s.mgr.bus.Publish(EventMessage, s.ownerID(), func(seq int64) any {
 		return MessagePayload{Seq: seq, ConvID: convID, Action: action, MessageID: msgID, Message: m}
 	})
 }
@@ -1603,7 +1621,7 @@ func (s *Session) publishConv(action string, conv *store.Conversation) {
 		c.Compacting = s.mgr.IsCompacting(convID)
 		conv = &c
 	}
-	s.lastSeq = s.mgr.bus.Publish(EventConv, func(seq int64) any {
+	s.lastSeq = s.mgr.bus.Publish(EventConv, s.ownerID(), func(seq int64) any {
 		return ConvPayload{Seq: seq, ConvID: convID, Action: action, Conv: conv}
 	})
 }

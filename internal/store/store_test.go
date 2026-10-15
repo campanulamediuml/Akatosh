@@ -91,6 +91,11 @@ func TestMigrateV2ToV3BackfillsProvider(t *testing.T) {
 	}
 	defer st.Close()
 
+	// 真实升级路径：迁移后做用户引导，存量数据全部划给首个管理员（id=1）
+	if _, _, err := st.BootstrapUsers(""); err != nil {
+		t.Fatalf("用户引导失败: %v", err)
+	}
+
 	conv, err := st.GetConversation(1)
 	if err != nil || conv == nil {
 		t.Fatalf("老会话丢了: %v", err)
@@ -110,13 +115,13 @@ func TestMigrateV2ToV3BackfillsProvider(t *testing.T) {
 		t.Fatalf("老消息丢了: %v %+v", err, msgs)
 	}
 
-	models, err := st.ListModels(1)
+	models, err := st.ListModels(1, 1)
 	if err != nil || len(models) != 1 || !models[0].Reasoning || len(models[0].Efforts) != 2 {
 		t.Fatalf("老模型缓存丢了或能力标志坏了: %v %+v", err, models)
 	}
 
 	// 默认供应商也该被顺手记住，否则新建会话会没着落
-	if v, _ := st.GetSetting(SettingDefaultProvider); v != "1" {
+	if v, _ := st.GetSetting(1, SettingDefaultProvider); v != "1" {
 		t.Fatalf("默认供应商没写上，实际 %q", v)
 	}
 	// 版本号要落到 3，否则每次启动都重跑迁移
@@ -130,11 +135,11 @@ func TestMigrateV2ToV3BackfillsProvider(t *testing.T) {
 func TestSameModelNameUnderTwoProviders(t *testing.T) {
 	st := newTestStore(t)
 
-	a, err := st.CreateProvider("网关A", "https://a.example.com/v1", "ka")
+	a, err := st.CreateProvider(1, "网关A", "https://a.example.com/v1", "ka")
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := st.CreateProvider("网关B", "https://b.example.com/v1", "kb")
+	b, err := st.CreateProvider(1, "网关B", "https://b.example.com/v1", "kb")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,11 +169,11 @@ func TestSameModelNameUnderTwoProviders(t *testing.T) {
 		t.Fatalf("能力串台了: A.reasoning=%v B.reasoning=%v", ma.Reasoning, mb.Reasoning)
 	}
 
-	all, err := st.ListModels(0)
+	all, err := st.ListModels(1, 0)
 	if err != nil || len(all) != 2 {
 		t.Fatalf("总模型数应为 2，实际 %d (err=%v)", len(all), err)
 	}
-	onlyA, err := st.ListModels(a.ID)
+	onlyA, err := st.ListModels(1, a.ID)
 	if err != nil || len(onlyA) != 1 || onlyA[0].ProviderID != a.ID {
 		t.Fatalf("按供应商过滤不对: %v %+v", err, onlyA)
 	}
@@ -178,20 +183,20 @@ func TestSameModelNameUnderTwoProviders(t *testing.T) {
 func TestResolveDefaultsKeepsModelInItsProvider(t *testing.T) {
 	st := newTestStore(t)
 
-	a, _ := st.CreateProvider("A", "https://a.example.com/v1", "k")
-	b, _ := st.CreateProvider("B", "https://b.example.com/v1", "k")
+	a, _ := st.CreateProvider(1, "A", "https://a.example.com/v1", "k")
+	b, _ := st.CreateProvider(1, "B", "https://b.example.com/v1", "k")
 	_, _ = st.UpsertModels(a.ID, []Model{{ModelID: "model-a"}})
 	_, _ = st.UpsertModels(b.ID, []Model{{ModelID: "model-b"}})
-	_ = st.SetSetting(SettingDefaultModel, "model-a") // 默认模型属于 A
+	_ = st.SetSetting(1, SettingDefaultModel, "model-a") // 默认模型属于 A
 
 	// 会话指到 B：不能把 model-a 用过去，应当落到 B 自己的 model-b
-	pid, mid, _ := st.ResolveDefaults(b.ID, "", "")
+	pid, mid, _ := st.ResolveDefaults(1, b.ID, "", "")
 	if pid != b.ID || mid != "model-b" {
 		t.Fatalf("应当解析成 B/model-b，实际 %d/%s", pid, mid)
 	}
 
 	// 显式给了模型就照用
-	pid2, mid2, _ := st.ResolveDefaults(b.ID, "model-b", "high")
+	pid2, mid2, _ := st.ResolveDefaults(1, b.ID, "model-b", "high")
 	if pid2 != b.ID || mid2 != "model-b" {
 		t.Fatalf("显式指定不该被改写，实际 %d/%s", pid2, mid2)
 	}
@@ -201,11 +206,11 @@ func TestResolveDefaultsKeepsModelInItsProvider(t *testing.T) {
 func TestDeleteProviderFallsBackToDefault(t *testing.T) {
 	st := newTestStore(t)
 
-	a, _ := st.CreateProvider("A", "https://a.example.com/v1", "k") // 第一个建的 = 默认
-	b, _ := st.CreateProvider("B", "https://b.example.com/v1", "k")
+	a, _ := st.CreateProvider(1, "A", "https://a.example.com/v1", "k") // 第一个建的 = 默认
+	b, _ := st.CreateProvider(1, "B", "https://b.example.com/v1", "k")
 	_, _ = st.UpsertModels(b.ID, []Model{{ModelID: "model-b"}})
 
-	conv, err := st.CreateConversation("挂在 B 上", b.ID, "model-b", "high")
+	conv, err := st.CreateConversation(1, "挂在 B 上", b.ID, "model-b", "high")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +221,7 @@ func TestDeleteProviderFallsBackToDefault(t *testing.T) {
 		t.Fatalf("provider_name 不对: %q", conv.ProviderName)
 	}
 
-	if err := st.DeleteProvider(b.ID); err != nil {
+	if err := st.DeleteProvider(b.ID, 1); err != nil {
 		t.Fatalf("删供应商失败: %v", err)
 	}
 
@@ -229,7 +234,7 @@ func TestDeleteProviderFallsBackToDefault(t *testing.T) {
 		t.Fatalf("供应商没了，provider_name 应当是空串，实际 %q", after.ProviderName)
 	}
 	// 但解析时要能回退到 A
-	p, err := st.ResolveProvider(after.ProviderID)
+	p, err := st.ResolveProvider(1, after.ProviderID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +243,7 @@ func TestDeleteProviderFallsBackToDefault(t *testing.T) {
 	}
 
 	// B 的模型缓存应当被级联删掉
-	models, _ := st.ListModels(b.ID)
+	models, _ := st.ListModels(1, b.ID)
 	if len(models) != 0 {
 		t.Fatalf("B 的模型缓存没有级联删除: %+v", models)
 	}
@@ -247,7 +252,7 @@ func TestDeleteProviderFallsBackToDefault(t *testing.T) {
 // 未读小红点的语义：**只认已经答完的**，正在生成时不该亮；看过了就灭。
 func TestUnreadFlag(t *testing.T) {
 	st := newTestStore(t)
-	conv, err := st.CreateConversation("未读测试", 0, "", "")
+	conv, err := st.CreateConversation(1, "未读测试", 0, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,11 +333,11 @@ func TestUnreadFlag(t *testing.T) {
 // 侧边栏靠 updated_at 倒序排，所以「谁更新谁在前」这条排序规则要锁住。
 func TestConversationOrderFollowsUpdatedAt(t *testing.T) {
 	st := newTestStore(t)
-	a, _ := st.CreateConversation("A", 0, "", "")
+	a, _ := st.CreateConversation(1, "A", 0, "", "")
 	time.Sleep(3 * time.Millisecond)
-	b, _ := st.CreateConversation("B", 0, "", "")
+	b, _ := st.CreateConversation(1, "B", 0, "", "")
 
-	list, err := st.ListConversations()
+	list, err := st.ListConversations(1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +350,7 @@ func TestConversationOrderFollowsUpdatedAt(t *testing.T) {
 	if err := st.TouchConversation(a.ID); err != nil {
 		t.Fatal(err)
 	}
-	list, _ = st.ListConversations()
+	list, _ = st.ListConversations(1)
 	if list[0].ID != a.ID {
 		t.Fatalf("A 刚有活动，应当排到最前，实际第一个是 %d", list[0].ID)
 	}
@@ -355,12 +360,12 @@ func TestConversationOrderFollowsUpdatedAt(t *testing.T) {
 func TestPatchProviderClearsStaleModel(t *testing.T) {
 	st := newTestStore(t)
 
-	a, _ := st.CreateProvider("A", "https://a.example.com/v1", "k")
-	b, _ := st.CreateProvider("B", "https://b.example.com/v1", "k")
+	a, _ := st.CreateProvider(1, "A", "https://a.example.com/v1", "k")
+	b, _ := st.CreateProvider(1, "B", "https://b.example.com/v1", "k")
 	_, _ = st.UpsertModels(a.ID, []Model{{ModelID: "only-in-a"}})
 	_, _ = st.UpsertModels(b.ID, []Model{{ModelID: "only-in-b"}})
 
-	conv, err := st.CreateConversation("t", a.ID, "only-in-a", "medium")
+	conv, err := st.CreateConversation(1, "t", a.ID, "only-in-a", "medium")
 	if err != nil {
 		t.Fatal(err)
 	}

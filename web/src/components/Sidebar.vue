@@ -134,7 +134,7 @@ function doDelete(id: number): void {
 <template>
   <aside class="sidebar">
     <div class="sidebar__head">
-      <span class="sidebar__brand">AI 助手</span>
+      <span class="sidebar__brand">Akatosh</span>
       <!-- 设置是全局的（供应商/默认提示词…），不放 session 窗口里 -->
       <button type="button" class="icon-btn" title="设置" @click="emit('open-settings')">
         <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">

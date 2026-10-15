@@ -67,7 +67,7 @@ function clearToken(): void {
 
       <div class="modal__body">
         <p class="token__lead">
-          这个服务启用了访问令牌（启动参数 <code>-token</code>），当前请求被拒绝了（HTTP 401）。
+          这个服务需要访问令牌才能使用（每个用户一个，数据互相隔离），当前请求被拒绝了（HTTP 401）。
         </p>
 
         <p v-if="hint" class="token__note">{{ hint }}</p>
@@ -96,11 +96,11 @@ function clearToken(): void {
         </p>
 
         <details class="token__help">
-          <summary>令牌在哪儿看？</summary>
+          <summary>令牌从哪儿拿？</summary>
           <p>
-            启动服务的那个终端窗口里。用 <code>-token auto</code> 启动时会直接打印一行
-            「手机直接开这个地址」，把整条地址在手机浏览器里打开即可 —— 那种方式不需要手输，
-            服务端会顺手把令牌换成 cookie 并把它从地址栏抹掉。
+            找这个服务的管理员要。管理员在「设置 → 用户管理」里创建用户，每个用户一个令牌；
+            直接打开管理员发的「登录链接」最省事 —— 服务端会顺手把令牌换成 cookie 并把它从地址栏抹掉，
+            之后从主屏幕启动也不用再输。
           </p>
           <p>
             如果浏览器禁用了 cookie，接口能通但图片可能显示不出来 —— 令牌存下来之后走的是请求头，

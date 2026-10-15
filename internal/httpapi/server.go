@@ -14,6 +14,8 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"aiassistant/internal/llm"
 	"aiassistant/internal/media"
@@ -36,21 +38,19 @@ type Server struct {
 	// 只用来打启动告警 —— **不再用它放宽 Host 校验**，见 hostAllowed。
 	exposed bool
 
-	// token 非空时启用访问令牌鉴权，详见 auth.go。
-	token string
 	// allowHosts 是额外放行的主机名（非 IP 字面量）。
 	// 正常用 IP 访问不需要它；用机器名 / MagicDNS 名字访问时才要配。
 	allowHosts []string
+
+	// lastSeenMu/lastSeen 是 last_seen_at 的节流表：
+	// 每个用户每分钟最多写一次库，免得每个 API 请求都 UPDATE users。
+	lastSeenMu sync.Mutex
+	lastSeen   map[int64]int64
 }
 
 // Option 用来扩展 Server 配置。
 // 用变参而不是加必填形参，是为了不破坏既有调用点（含测试）。
 type Option func(*Server)
-
-// WithToken 启用访问令牌鉴权。空串 = 不鉴权。
-func WithToken(token string) Option {
-	return func(s *Server) { s.token = strings.TrimSpace(token) }
-}
 
 // WithAllowHosts 设置额外放行的主机名白名单（逗号分隔或直接给切片）。
 func WithAllowHosts(hosts []string) Option {
@@ -64,12 +64,13 @@ func WithFilesDir(dir string) Option {
 
 func New(st *store.Store, mgr *session.Manager, web fs.FS, version, bindAddr string, mediaStore *media.Store, opts ...Option) *Server {
 	s := &Server{
-		st:      st,
-		mgr:     mgr,
-		web:     web,
-		version: version,
-		media:   mediaStore,
-		exposed: bindIsExposed(bindAddr),
+		st:       st,
+		mgr:      mgr,
+		web:      web,
+		version:  version,
+		media:    mediaStore,
+		exposed:  bindIsExposed(bindAddr),
+		lastSeen: map[int64]int64{},
 	}
 	for _, o := range opts {
 		if o != nil {
@@ -83,8 +84,18 @@ func New(st *store.Store, mgr *session.Manager, web fs.FS, version, bindAddr str
 // Exposed 报告服务是否绑到了非回环地址（main 用来打告警）。
 func (s *Server) Exposed() bool { return s.exposed }
 
-// TokenEnabled 报告是否启用了访问令牌（main 用来打提示）。
-func (s *Server) TokenEnabled() bool { return s.tokenEnabled() }
+// touchUserThrottled 刷新用户的 last_seen_at，每个用户每分钟最多写一次。
+func (s *Server) touchUserThrottled(userID int64) {
+	now := time.Now().UnixMilli()
+	s.lastSeenMu.Lock()
+	if now-s.lastSeen[userID] < 60_000 {
+		s.lastSeenMu.Unlock()
+		return
+	}
+	s.lastSeen[userID] = now
+	s.lastSeenMu.Unlock()
+	s.st.TouchUser(userID)
+}
 
 func (s *Server) routes() {
 	m := http.NewServeMux()
@@ -125,6 +136,13 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/conversations/{id}/compact", s.handleCompactConversation)
 	m.HandleFunc("GET /api/conversations/{id}/messages", s.handleListMessages)
 	m.HandleFunc("DELETE /api/messages/{id}", s.handleDeleteMessage)
+
+	// 当前用户 / 用户管理（管理员）
+	m.HandleFunc("GET /api/me", s.handleMe)
+	m.HandleFunc("GET /api/users", s.handleListUsers)
+	m.HandleFunc("POST /api/users", s.handleCreateUser)
+	m.HandleFunc("POST /api/users/{id}/token", s.handleRotateUserToken)
+	m.HandleFunc("DELETE /api/users/{id}", s.handleDeleteUser)
 
 	// 附件（图片）
 	m.HandleFunc("POST /api/uploads", s.handleUpload)
@@ -432,10 +450,10 @@ func pathID(w http.ResponseWriter, r *http.Request, name string) (int64, bool) {
 	return n, true
 }
 
-// clientFor 按供应商构造上游客户端（工具/诊断接口用）。
-// providerID <= 0 时回退到默认供应商。
-func (s *Server) clientFor(providerID int64) (*llm.Client, error) {
-	p, err := s.st.ResolveProvider(providerID)
+// clientFor 按供应商构造上游客户端（工具/诊断接口用；多租户：按用户隔离）。
+// providerID <= 0 时回退到该用户的默认供应商。
+func (s *Server) clientFor(userID, providerID int64) (*llm.Client, error) {
+	p, err := s.st.ResolveProvider(userID, providerID)
 	if err != nil {
 		return nil, err
 	}

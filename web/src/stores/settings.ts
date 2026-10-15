@@ -19,12 +19,14 @@ import { api, toError } from '@/api/client'
 import type {
   CreateProviderInput,
   DefaultsInput,
+  Me,
   Model,
   Provider,
   ProviderTestResponse,
   SettingsDefaults,
   SettingsResponse,
   UpdateProviderInput,
+  UserInfo,
 } from '@/api/types'
 import { toast } from './toast'
 
@@ -56,6 +58,13 @@ interface SettingsState {
   webSearchAvailable: boolean
   /** 上下文压缩阈值（0~1，0 = 禁用） */
   compactThreshold: number
+
+  /** 当前登录用户（GET /api/me）；null = 还没拉过 */
+  me: Me | null
+
+  /** 用户管理（管理员）：用户列表与操作态 */
+  users: UserInfo[]
+  loadingUsers: boolean
 
   /** 新增 / 编辑供应商表单的保存中 */
   savingProvider: boolean
@@ -92,6 +101,9 @@ export const useSettingsStore = defineStore('settings', {
     models: [],
     webSearchAvailable: false,
     compactThreshold: 0,
+    me: null,
+    users: [],
+    loadingUsers: false,
     savingProvider: false,
     deletingId: null,
     savingDefaults: false,
@@ -102,6 +114,16 @@ export const useSettingsStore = defineStore('settings', {
   }),
 
   getters: {
+    /** 当前用户是否管理员（决定「用户管理」入口的显隐） */
+    isAdmin(state): boolean {
+      return state.me?.is_admin === true
+    },
+
+    /** 当前用户名（界面角落展示用；没拉到就空串） */
+    userName(state): string {
+      return state.me?.name ?? ''
+    },
+
     /** 至少配了一家供应商（有的上游不需要 key，所以只看有没有记录） */
     hasProvider(state): boolean {
       return state.providers.length > 0
@@ -193,10 +215,68 @@ export const useSettingsStore = defineStore('settings', {
       if (this.loading) return
       this.loading = true
       try {
-        await Promise.all([this.loadSettings(), this.loadModels()])
+        await Promise.all([this.loadMe(), this.loadSettings(), this.loadModels()])
       } finally {
         this.loading = false
         this.loaded = true
+      }
+    },
+
+    /** GET /api/me：当前登录用户（管理员标记决定「用户管理」入口显隐） */
+    async loadMe(): Promise<void> {
+      try {
+        this.me = await api.getMe()
+      } catch {
+        this.me = null
+      }
+    },
+
+    /* ---------------- 用户管理（管理员） ---------------- */
+
+    /** 拉用户列表（非管理员会得到 403，静默吞掉——入口本来就藏着） */
+    async loadUsers(): Promise<void> {
+      if (!this.isAdmin) return
+      this.loadingUsers = true
+      try {
+        this.users = await api.listUsers()
+      } catch (err) {
+        toast.error(`加载用户列表失败：${toError(err).message}`)
+      } finally {
+        this.loadingUsers = false
+      }
+    },
+
+    /** 创建用户：返回明文令牌（只在创建这一刻可见，必须当场复制） */
+    async createUser(name: string): Promise<string | null> {
+      try {
+        const res = await api.createUser(name)
+        await this.loadUsers()
+        return res.token
+      } catch (err) {
+        toast.error(`创建用户失败：${toError(err).message}`)
+        return null
+      }
+    },
+
+    /** 重置令牌：旧令牌立即失效；返回的新令牌同样只可见这一次 */
+    async rotateToken(id: number): Promise<string | null> {
+      try {
+        const res = await api.rotateUserToken(id)
+        return res.token
+      } catch (err) {
+        toast.error(`重置令牌失败：${toError(err).message}`)
+        return null
+      }
+    },
+
+    async deleteUser(id: number): Promise<boolean> {
+      try {
+        await api.deleteUser(id)
+        this.users = this.users.filter((u) => u.id !== id)
+        return true
+      } catch (err) {
+        toast.error(`删除用户失败：${toError(err).message}`)
+        return false
       }
     },
 

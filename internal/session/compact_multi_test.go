@@ -44,21 +44,21 @@ func compactUpstream(t *testing.T, inputs *[]string, mu *sync.Mutex) *httptest.S
 
 func compactManager(t *testing.T, st *store.Store, upURL string) *Manager {
 	t.Helper()
-	return NewManager(st, NewBus(), func(providerID int64) (*llm.Client, error) {
+	return NewManager(st, NewBus(), func(userID, providerID int64) (*llm.Client, error) {
 		return llm.New(upURL+"/v1", "k"), nil
 	}).WithCompactThreshold(0.5)
 }
 
 func seedConvWithUpstream(t *testing.T, st *store.Store, upURL string, n int, contentLen int) *store.Conversation {
 	t.Helper()
-	p, err := st.CreateProvider("p", upURL+"/v1", "k")
+	p, err := st.CreateProvider(1, "p", upURL+"/v1", "k")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.UpsertModels(p.ID, []store.Model{{ModelID: "m", Reasoning: true, Efforts: []string{"high"}, ContextLen: 10000}}); err != nil {
 		t.Fatal(err)
 	}
-	conv, err := st.CreateConversation("t", p.ID, "m", "")
+	conv, err := st.CreateConversation(1, "t", p.ID, "m", "")
 	if err != nil {
 		t.Fatal(err)
 	}

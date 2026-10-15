@@ -14,39 +14,21 @@ import (
 var ErrNotFound = errors.New("not found")
 
 // ---------- providers ----------
+//
+// 多租户：providers 完全按用户隔离（apikey 隔离是硬性要求）。
+// 所有读写都必须带 userID；GetProviderByID 是唯一不带的方法，
+// 只给「已经做过归属校验」的内部路径用（比如按会话里记录的 provider_id 反查）。
 
-// ListProviders 返回全部供应商（按 id 升序），顺带带上各自的模型数。
-func (s *Store) ListProviders() ([]Provider, error) {
-	rows, err := s.db.Query(
-		`SELECT p.id, p.name, p.base_url, p.api_key, p.created_at, p.updated_at,
-		        (SELECT COUNT(*) FROM models m WHERE m.provider_id = p.id)
-		   FROM providers p ORDER BY p.id`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+// provCols 不含模型数：模型数在列表接口里单独算。
+const provCols = `p.id, p.user_id, p.name, p.base_url, p.api_key, p.created_at, p.updated_at`
 
-	out := []Provider{}
-	for rows.Next() {
-		var p Provider
-		if err := rows.Scan(&p.ID, &p.Name, &p.BaseURL, &p.APIKey, &p.CreatedAt, &p.UpdatedAt, &p.ModelCount); err != nil {
-			return nil, err
-		}
-		out = append(out, p)
-	}
-	return out, rows.Err()
-}
-
-// GetProviderByID 按 id 取供应商；不存在返回 (nil, nil)。
-func (s *Store) GetProviderByID(id int64) (*Provider, error) {
+func scanProvider(sc interface{ Scan(...any) error }, withCount bool) (*Provider, error) {
 	var p Provider
-	err := s.db.QueryRow(
-		`SELECT p.id, p.name, p.base_url, p.api_key, p.created_at, p.updated_at,
-		        (SELECT COUNT(*) FROM models m WHERE m.provider_id = p.id)
-		   FROM providers p WHERE p.id = ?`, id).
-		Scan(&p.ID, &p.Name, &p.BaseURL, &p.APIKey, &p.CreatedAt, &p.UpdatedAt, &p.ModelCount)
-	if err == sql.ErrNoRows {
-		return nil, nil
+	var err error
+	if withCount {
+		err = sc.Scan(&p.ID, &p.UserID, &p.Name, &p.BaseURL, &p.APIKey, &p.CreatedAt, &p.UpdatedAt, &p.ModelCount)
+	} else {
+		err = sc.Scan(&p.ID, &p.UserID, &p.Name, &p.BaseURL, &p.APIKey, &p.CreatedAt, &p.UpdatedAt)
 	}
 	if err != nil {
 		return nil, err
@@ -54,12 +36,62 @@ func (s *Store) GetProviderByID(id int64) (*Provider, error) {
 	return &p, nil
 }
 
-// DefaultProvider 返回「当前默认供应商」：
-// 先看设置里记的 id，取不到就退回 id 最小的那条。都没有则返回 (nil, nil)。
-func (s *Store) DefaultProvider() (*Provider, error) {
-	if v, _ := s.GetSetting(SettingDefaultProvider); v != "" {
+// ListProviders 返回某个用户的全部供应商（按 id 升序），顺带带上各自的模型数。
+func (s *Store) ListProviders(userID int64) ([]Provider, error) {
+	rows, err := s.db.Query(
+		`SELECT `+provCols+`, (SELECT COUNT(*) FROM models m WHERE m.provider_id = p.id)
+		   FROM providers p WHERE p.user_id = ? ORDER BY p.id`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []Provider{}
+	for rows.Next() {
+		p, err := scanProvider(rows, true)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *p)
+	}
+	return out, rows.Err()
+}
+
+// GetProviderByID 按 id 取供应商；不存在返回 (nil, nil)。
+// 不带归属校验——调用方必须自己保证这条记录属于当前用户（或做系统级反查）。
+func (s *Store) GetProviderByID(id int64) (*Provider, error) {
+	row := s.db.QueryRow(
+		`SELECT `+provCols+`, (SELECT COUNT(*) FROM models m WHERE m.provider_id = p.id)
+		   FROM providers p WHERE p.id = ?`, id)
+	p, err := scanProvider(row, true)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// GetProviderForUser 按 id 取供应商并校验归属：不是当前用户的返回 (nil, nil)
+// —— 对外一律表现得像「不存在」，不暴露「有这么一条但是别人的」。
+func (s *Store) GetProviderForUser(id, userID int64) (*Provider, error) {
+	p, err := s.GetProviderByID(id)
+	if err != nil || p == nil {
+		return p, err
+	}
+	if p.UserID != userID {
+		return nil, nil
+	}
+	return p, nil
+}
+
+// DefaultProvider 返回「当前用户的默认供应商」：
+// 先看设置里记的 id，取不到就退回该用户 id 最小的那条。都没有则返回 (nil, nil)。
+func (s *Store) DefaultProvider(userID int64) (*Provider, error) {
+	if v, _ := s.GetSetting(userID, SettingDefaultProvider); v != "" {
 		if id, err := strconv.ParseInt(v, 10, 64); err == nil && id > 0 {
-			p, err := s.GetProviderByID(id)
+			p, err := s.GetProviderForUser(id, userID)
 			if err != nil {
 				return nil, err
 			}
@@ -68,13 +100,13 @@ func (s *Store) DefaultProvider() (*Provider, error) {
 			}
 		}
 	}
-	return s.FirstProvider()
+	return s.FirstProvider(userID)
 }
 
-// FirstProvider 退回用：id 最小的那条供应商。
-func (s *Store) FirstProvider() (*Provider, error) {
+// FirstProvider 退回用：该用户 id 最小的那条供应商。
+func (s *Store) FirstProvider(userID int64) (*Provider, error) {
 	var id int64
-	err := s.db.QueryRow(`SELECT id FROM providers ORDER BY id LIMIT 1`).Scan(&id)
+	err := s.db.QueryRow(`SELECT id FROM providers WHERE user_id = ? ORDER BY id LIMIT 1`, userID).Scan(&id)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -84,36 +116,36 @@ func (s *Store) FirstProvider() (*Provider, error) {
 	return s.GetProviderByID(id)
 }
 
-// CountProviders 返回供应商总数（判断「还没配过」用）。
-func (s *Store) CountProviders() (int, error) {
+// CountProviders 返回该用户的供应商总数（判断「还没配过」用）。
+func (s *Store) CountProviders(userID int64) (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM providers`).Scan(&n)
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM providers WHERE user_id = ?`, userID).Scan(&n)
 	return n, err
 }
 
-// CreateProvider 新建一个供应商。
-func (s *Store) CreateProvider(name, baseURL, apiKey string) (*Provider, error) {
+// CreateProvider 给某个用户新建一个供应商。
+func (s *Store) CreateProvider(userID int64, name, baseURL, apiKey string) (*Provider, error) {
 	if strings.TrimSpace(name) == "" {
 		name = DefaultProviderN
 	}
 	now := NowMs()
 	res, err := s.db.Exec(
-		`INSERT INTO providers(name, base_url, api_key, created_at, updated_at) VALUES(?, ?, ?, ?, ?)`,
-		name, baseURL, apiKey, now, now)
+		`INSERT INTO providers(user_id, name, base_url, api_key, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?)`,
+		userID, name, baseURL, apiKey, now, now)
 	if err != nil {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
 	// 第一个建的自动成为默认供应商，省得用户还要去设一次
-	if v, _ := s.GetSetting(SettingDefaultProvider); v == "" {
-		_ = s.SetSetting(SettingDefaultProvider, strconv.FormatInt(id, 10))
+	if v, _ := s.GetSetting(userID, SettingDefaultProvider); v == "" {
+		_ = s.SetSetting(userID, SettingDefaultProvider, strconv.FormatInt(id, 10))
 	}
 	return s.GetProviderByID(id)
 }
 
-// UpdateProvider 更新供应商。apiKey 为空串表示「保留原 key 不动」。
-func (s *Store) UpdateProvider(id int64, name, baseURL, apiKey string) (*Provider, error) {
-	cur, err := s.GetProviderByID(id)
+// UpdateProvider 更新供应商（带归属校验）。apiKey 为空串表示「保留原 key 不动」。
+func (s *Store) UpdateProvider(id, userID int64, name, baseURL, apiKey string) (*Provider, error) {
+	cur, err := s.GetProviderForUser(id, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -137,40 +169,40 @@ func (s *Store) UpdateProvider(id int64, name, baseURL, apiKey string) (*Provide
 	return s.GetProviderByID(id)
 }
 
-// DeleteProvider 删除供应商，连同它的模型缓存（外键 ON DELETE CASCADE）。
+// DeleteProvider 删除供应商（带归属校验），连同它的模型缓存（外键 ON DELETE CASCADE）。
 //
 // 引用它的会话不会被删：那些会话的 provider_id 留着，读取时如果发现供应商没了
-// 会回退到默认供应商（见 ResolveConversationProvider）。这样用户误删一个供应商
+// 会回退到默认供应商（见 ResolveProvider）。这样用户误删一个供应商
 // 不会连带炸掉聊天记录。
-func (s *Store) DeleteProvider(id int64) error {
-	res, err := s.db.Exec(`DELETE FROM providers WHERE id = ?`, id)
+func (s *Store) DeleteProvider(id, userID int64) error {
+	res, err := s.db.Exec(`DELETE FROM providers WHERE id = ? AND user_id = ?`, id, userID)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
-	// 如果删掉的正是默认供应商，把默认指向剩下第一条
-	if v, _ := s.GetSetting(SettingDefaultProvider); v == strconv.FormatInt(id, 10) {
-		next, err := s.FirstProvider()
+	// 如果删掉的正是默认供应商，把默认指向该用户剩下第一条
+	if v, _ := s.GetSetting(userID, SettingDefaultProvider); v == strconv.FormatInt(id, 10) {
+		next, err := s.FirstProvider(userID)
 		if err != nil {
 			return err
 		}
 		if next != nil {
-			_ = s.SetSetting(SettingDefaultProvider, strconv.FormatInt(next.ID, 10))
+			_ = s.SetSetting(userID, SettingDefaultProvider, strconv.FormatInt(next.ID, 10))
 		} else {
-			_ = s.SetSetting(SettingDefaultProvider, "")
-			_ = s.SetSetting(SettingDefaultModel, "")
+			_ = s.SetSetting(userID, SettingDefaultProvider, "")
+			_ = s.SetSetting(userID, SettingDefaultModel, "")
 		}
 	}
 	return nil
 }
 
-// ResolveProvider 给一个会话用的 provider_id：存在就用它，
-// 不存在（比如供应商被删了）就回退到默认供应商。都没有则返回 (nil, nil)。
-func (s *Store) ResolveProvider(id int64) (*Provider, error) {
+// ResolveProvider 给一个会话用的 provider_id：属于这个用户就用它，
+// 不存在（比如供应商被删了）就回退到该用户的默认供应商。都没有则返回 (nil, nil)。
+func (s *Store) ResolveProvider(userID, id int64) (*Provider, error) {
 	if id > 0 {
-		p, err := s.GetProviderByID(id)
+		p, err := s.GetProviderForUser(id, userID)
 		if err != nil {
 			return nil, err
 		}
@@ -178,7 +210,7 @@ func (s *Store) ResolveProvider(id int64) (*Provider, error) {
 			return p, nil
 		}
 	}
-	return s.DefaultProvider()
+	return s.DefaultProvider(userID)
 }
 
 // ---------- models ----------
@@ -252,12 +284,13 @@ func scanModel(rows interface{ Scan(...any) error }) (*Model, error) {
 	return &m, nil
 }
 
-// ListModels 返回模型缓存。providerID > 0 时只看那一家。
-func (s *Store) ListModels(providerID int64) ([]Model, error) {
-	q := `SELECT ` + modelCols + ` FROM models`
-	args := []any{}
+// ListModels 返回某个用户的模型缓存（经 providers 归属过滤，看不到别家的）。
+// providerID > 0 时只看那一家（归属同样校验）。
+func (s *Store) ListModels(userID, providerID int64) ([]Model, error) {
+	q := `SELECT ` + modelCols + ` FROM models WHERE provider_id IN (SELECT id FROM providers WHERE user_id = ?)`
+	args := []any{userID}
 	if providerID > 0 {
-		q += ` WHERE provider_id = ?`
+		q += ` AND provider_id = ?`
 		args = append(args, providerID)
 	}
 	q += ` ORDER BY provider_id, model_id`

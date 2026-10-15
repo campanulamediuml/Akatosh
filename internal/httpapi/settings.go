@@ -50,7 +50,7 @@ func providerViews(list []store.Provider) []map[string]any {
 // ---------- 供应商 CRUD ----------
 
 func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
-	list, err := s.st.ListProviders()
+	list, err := s.st.ListProviders(userOf(r).ID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -72,12 +72,12 @@ func (s *Server) handleCreateProvider(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", "API 地址不能为空，且必须以 http:// 或 https:// 开头")
 		return
 	}
-	p, err := s.st.CreateProvider(strings.TrimSpace(body.Name), base, strings.TrimSpace(body.APIKey))
+	p, err := s.st.CreateProvider(userOf(r).ID, strings.TrimSpace(body.Name), base, strings.TrimSpace(body.APIKey))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	s.publishProvider()
+	s.publishProvider(userOf(r).ID)
 	writeJSON(w, http.StatusCreated, providerView(p))
 }
 
@@ -100,7 +100,7 @@ func (s *Server) handlePatchProvider(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	p, err := s.st.UpdateProvider(id, body.Name, strings.TrimSpace(body.BaseURL), body.APIKey)
+	p, err := s.st.UpdateProvider(id, userOf(r).ID, body.Name, strings.TrimSpace(body.BaseURL), body.APIKey)
 	if errors.Is(err, store.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "not_found", "供应商不存在")
 		return
@@ -117,21 +117,22 @@ func (s *Server) handleDeleteProvider(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.st.DeleteProvider(id); errors.Is(err, store.ErrNotFound) {
+	if err := s.st.DeleteProvider(id, userOf(r).ID); errors.Is(err, store.ErrNotFound) {
 		writeErr(w, http.StatusNotFound, "not_found", "供应商不存在")
 		return
 	} else if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	s.publishProvider()
+	s.publishProvider(userOf(r).ID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // publishProvider 供应商变了会连带影响「默认值」与各会话可选的模型，
-// 推一个 notice 让所有标签页重新拉设置（比逐个会话推 conv 事件简单可靠）。
-func (s *Server) publishProvider() {
-	s.mgr.Bus().Publish(session.EventNotice, func(seq int64) any {
+// 推一个 notice 让这个用户的所有标签页重新拉设置（比逐个会话推 conv 事件简单可靠）。
+// 多租户：只推给操作者本人（供应商是按用户隔离的，别人不需要也不该知道）。
+func (s *Server) publishProvider(userID int64) {
+	s.mgr.Bus().Publish(session.EventNotice, userID, func(seq int64) any {
 		return session.NoticePayload{
 			Seq:   seq,
 			Level: "info",
@@ -149,7 +150,7 @@ func (s *Server) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	provider, err := s.st.GetProviderByID(id)
+	provider, err := s.st.GetProviderForUser(id, userOf(r).ID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -194,9 +195,9 @@ func (s *Server) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 还没设过默认模型（或者设的那个不属于这家）就自动选一个，省得用户再点一次
-	s.ensureDefaultModel(provider.ID)
+	s.ensureDefaultModel(userOf(r).ID, provider.ID)
 
-	saved, err := s.st.ListModels(provider.ID)
+	saved, err := s.st.ListModels(userOf(r).ID, provider.ID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -209,9 +210,9 @@ func (s *Server) handleFetchModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // ensureDefaultModel 让设置里的默认模型落到「真的属于这家供应商」的模型上。
-func (s *Server) ensureDefaultModel(providerID int64) {
-	cur, _ := s.st.GetSetting(store.SettingDefaultModel)
-	defProvider, _ := s.st.DefaultProvider()
+func (s *Server) ensureDefaultModel(userID, providerID int64) {
+	cur, _ := s.st.GetSetting(userID, store.SettingDefaultModel)
+	defProvider, _ := s.st.DefaultProvider(userID)
 	// 只有默认供应商才有资格定默认模型
 	if defProvider == nil || defProvider.ID != providerID {
 		return
@@ -222,7 +223,7 @@ func (s *Server) ensureDefaultModel(providerID int64) {
 		}
 	}
 	if m, err := s.st.FirstModelOfProvider(providerID); err == nil && m != nil {
-		_ = s.st.SetSetting(store.SettingDefaultModel, m.ModelID)
+		_ = s.st.SetSetting(userID, store.SettingDefaultModel, m.ModelID)
 	}
 }
 
@@ -239,7 +240,7 @@ func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	provider, err := s.st.GetProviderByID(id)
+	provider, err := s.st.GetProviderForUser(id, userOf(r).ID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -255,12 +256,12 @@ func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 
 	model := strings.TrimSpace(body.ModelID)
 	if model == "" {
-		if v, _ := s.st.GetSetting(store.SettingDefaultModel); v != "" {
+		if v, _ := s.st.GetSetting(userOf(r).ID, store.SettingDefaultModel); v != "" {
 			model = v
 		}
 	}
 	if model == "" {
-		if ms, err := s.st.ListModels(provider.ID); err == nil && len(ms) > 0 {
+		if ms, err := s.st.ListModels(userOf(r).ID, provider.ID); err == nil && len(ms) > 0 {
 			model = ms[0].ModelID
 		}
 	}
@@ -297,7 +298,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 		}
 		providerID = n
 	}
-	list, err := s.st.ListModels(providerID)
+	list, err := s.st.ListModels(userOf(r).ID, providerID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -305,30 +306,30 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, list)
 }
 
-// settingsView 组装设置响应：供应商列表 + 新建会话的默认值。
-func (s *Server) settingsView() (map[string]any, error) {
-	list, err := s.st.ListProviders()
+// settingsView 组装设置响应：供应商列表 + 新建会话的默认值（全部按用户隔离）。
+func (s *Server) settingsView(userID int64) (map[string]any, error) {
+	list, err := s.st.ListProviders(userID)
 	if err != nil {
 		return nil, err
 	}
 	defaults := map[string]any{}
-	if v, _ := s.st.GetSetting(store.SettingDefaultProvider); v != "" {
+	if v, _ := s.st.GetSetting(userID, store.SettingDefaultProvider); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 			defaults["provider_id"] = n
 		}
 	}
-	if v, _ := s.st.GetSetting(store.SettingDefaultModel); v != "" {
+	if v, _ := s.st.GetSetting(userID, store.SettingDefaultModel); v != "" {
 		defaults["model_id"] = v
 	}
-	if v, _ := s.st.GetSetting(store.SettingDefaultEffort); v != "" {
+	if v, _ := s.st.GetSetting(userID, store.SettingDefaultEffort); v != "" {
 		defaults["effort"] = v
 	}
-	if v, _ := s.st.GetSetting(store.SettingDefaultSystemPrompt); v != "" {
+	if v, _ := s.st.GetSetting(userID, store.SettingDefaultSystemPrompt); v != "" {
 		defaults["system_prompt"] = v
 	}
 	// 没设过默认供应商时，把「实际会用的那家」告诉前端，免得下拉是空的
 	if _, ok := defaults["provider_id"]; !ok {
-		if p, err := s.st.DefaultProvider(); err == nil && p != nil {
+		if p, err := s.st.DefaultProvider(userID); err == nil && p != nil {
 			defaults["provider_id"] = p.ID
 		}
 	}
@@ -343,7 +344,7 @@ func (s *Server) settingsView() (map[string]any, error) {
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
-	view, err := s.settingsView()
+	view, err := s.settingsView(userOf(r).ID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -365,30 +366,30 @@ func (s *Server) handlePutDefaults(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.ProviderID != nil {
 		if *body.ProviderID <= 0 {
-			_ = s.st.SetSetting(store.SettingDefaultProvider, "")
-		} else if p, err := s.st.GetProviderByID(*body.ProviderID); err != nil {
+			_ = s.st.SetSetting(userOf(r).ID, store.SettingDefaultProvider, "")
+		} else if p, err := s.st.GetProviderForUser(*body.ProviderID, userOf(r).ID); err != nil {
 			writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		} else if p == nil {
 			writeErr(w, http.StatusNotFound, "not_found", "供应商不存在")
 			return
 		} else {
-			_ = s.st.SetSetting(store.SettingDefaultProvider, strconv.FormatInt(p.ID, 10))
+			_ = s.st.SetSetting(userOf(r).ID, store.SettingDefaultProvider, strconv.FormatInt(p.ID, 10))
 			// 换了默认供应商，原来那个默认模型多半不属于这家了
-			s.ensureDefaultModel(p.ID)
+			s.ensureDefaultModel(userOf(r).ID, p.ID)
 		}
 	}
 	if body.ModelID != nil {
-		_ = s.st.SetSetting(store.SettingDefaultModel, strings.TrimSpace(*body.ModelID))
+		_ = s.st.SetSetting(userOf(r).ID, store.SettingDefaultModel, strings.TrimSpace(*body.ModelID))
 	}
 	if body.Effort != nil {
-		_ = s.st.SetSetting(store.SettingDefaultEffort, strings.TrimSpace(*body.Effort))
+		_ = s.st.SetSetting(userOf(r).ID, store.SettingDefaultEffort, strings.TrimSpace(*body.Effort))
 	}
 	if body.SystemPrompt != nil {
 		// 系统提示词不做 TrimSpace 截断以外的任何加工（用户可能在意前导换行/缩进）
-		_ = s.st.SetSetting(store.SettingDefaultSystemPrompt, *body.SystemPrompt)
+		_ = s.st.SetSetting(userOf(r).ID, store.SettingDefaultSystemPrompt, *body.SystemPrompt)
 	}
-	view, err := s.settingsView()
+	view, err := s.settingsView(userOf(r).ID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return

@@ -65,9 +65,13 @@ const (
 )
 
 // Event 是总线上的一个事件。
+//
+// UserID 是事件的属主（多租户分发边界）：>0 时只推给同 userID 的订阅者，
+// 0 表示全局事件（广播给所有连接——目前只用于后端重启这类系统级信号）。
 type Event struct {
 	Type    string
 	Seq     int64
+	UserID  int64
 	Payload any
 }
 
@@ -83,12 +87,18 @@ const clientBuffer = 4096
 
 type busClient struct {
 	id     int64
+	userID int64 // 这条连接属于哪个用户（订阅时绑定）
 	ch     chan Event
 	once   sync.Once
 	closed chan struct{}
 }
 
 func (c *busClient) trySend(ev Event) {
+	// 多租户：带属主的事件只发给属主的连接，其它连接连排队都不排。
+	// 这是隔离的硬边界——事件里带着会话内容，跨用户投递就是泄露。
+	if ev.UserID != 0 && ev.UserID != c.userID {
+		return
+	}
 	select {
 	case c.ch <- ev:
 	default:
@@ -124,13 +134,15 @@ func (b *Bus) Seq() int64 {
 	return b.seq
 }
 
-// Subscribe 注册一个前端连接。
+// Subscribe 注册一个前端连接，并绑定这个连接所属的用户。
+// 之后带属主的事件只会发给同 userID 的连接（见 trySend）。
 // 返回的 cancel 必须被调用（SSE 处理函数 defer 即可），否则会泄漏。
-func (b *Bus) Subscribe() (id int64, ch <-chan Event, closed <-chan struct{}, cancel func()) {
+func (b *Bus) Subscribe(userID int64) (id int64, ch <-chan Event, closed <-chan struct{}, cancel func()) {
 	b.mu.Lock()
 	b.nextID++
 	c := &busClient{
 		id:     b.nextID,
+		userID: userID,
 		ch:     make(chan Event, clientBuffer),
 		closed: make(chan struct{}),
 	}
@@ -145,13 +157,13 @@ func (b *Bus) Subscribe() (id int64, ch <-chan Event, closed <-chan struct{}, ca
 	}
 }
 
-// Publish 给所有已连接前端广播一个事件，返回分配的 seq。
-// mk 负责把 seq 填进具体载荷里。
-func (b *Bus) Publish(typ string, mk func(seq int64) any) int64 {
+// Publish 发布一个事件，返回分配的 seq。mk 负责把 seq 填进具体载荷里。
+// userID 是事件属主：>0 只推给同用户连接；0 广播给全部连接（系统级事件）。
+func (b *Bus) Publish(typ string, userID int64, mk func(seq int64) any) int64 {
 	b.mu.Lock()
 	b.seq++
 	seq := b.seq
-	ev := Event{Type: typ, Seq: seq, Payload: mk(seq)}
+	ev := Event{Type: typ, Seq: seq, UserID: userID, Payload: mk(seq)}
 	targets := make([]*busClient, 0, len(b.clients))
 	for _, c := range b.clients {
 		targets = append(targets, c)

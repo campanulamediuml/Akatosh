@@ -334,7 +334,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="topbar__actions">
-          <!-- session 窗口只放会话级操作：压缩当前上下文（全局设置在侧栏「AI 助手」右边） -->
+          <!-- session 窗口只放会话级操作：压缩当前上下文（全局设置在侧栏「Akatosh」右边） -->
           <button
             v-if="chat.conv"
             type="button"

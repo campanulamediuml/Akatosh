@@ -26,7 +26,8 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, ch, closed, cancel := s.mgr.Bus().Subscribe()
+	// 订阅绑定当前用户：带属主的事件只推给同用户的连接（多租户隔离边界）
+	id, ch, closed, cancel := s.mgr.Bus().Subscribe(userOf(r).ID)
 	defer cancel()
 
 	_ = sw.Event(session.EventHello, session.HelloPayload{

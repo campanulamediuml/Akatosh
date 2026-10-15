@@ -114,7 +114,7 @@ func TestWebSearchToolLoop(t *testing.T) {
 	queries := []string{}
 	mgr.WithSearch(search.New(newSearx(t, &queries).URL))
 
-	conv, err := st.CreateConversation("联网测试", 0, "", "")
+	conv, err := st.CreateConversation(1, "联网测试", 0, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestWebSearchToolLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := mgr.SendMessage(context.Background(), conv.ID, "今天有什么新闻", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(context.Background(), 1, conv.ID, "今天有什么新闻", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	state := waitIdle(t, mgr, conv.ID)
@@ -164,11 +164,11 @@ func TestWebSearchOffByDefault(t *testing.T) {
 	mgr, st := newTestManager(t, up.srv.URL)
 	mgr.WithSearch(search.New(newSearx(t, &[]string{}).URL))
 
-	conv, err := st.CreateConversation("普通会话", 0, "", "")
+	conv, err := st.CreateConversation(1, "普通会话", 0, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := mgr.SendMessage(context.Background(), conv.ID, "你好", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(context.Background(), 1, conv.ID, "你好", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitIdle(t, mgr, conv.ID)
@@ -183,14 +183,14 @@ func TestWebSearchUnavailable(t *testing.T) {
 	up := newToolUpstream(t)
 	mgr, st := newTestManager(t, up.srv.URL) // 不注入 search
 
-	conv, err := st.CreateConversation("联网但无后端", 0, "", "")
+	conv, err := st.CreateConversation(1, "联网但无后端", 0, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.UpdateConversation(conv.ID, store.ConversationPatch{WebSearch: boolPtr(true)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := mgr.SendMessage(context.Background(), conv.ID, "你好", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(context.Background(), 1, conv.ID, "你好", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitIdle(t, mgr, conv.ID)
@@ -209,13 +209,13 @@ func TestWebSearchToggleMidConversation(t *testing.T) {
 	mgr, st := newTestManager(t, up.srv.URL)
 	mgr.WithSearch(search.New(newSearx(t, &[]string{}).URL))
 
-	conv, err := st.CreateConversation("中途开联网", 0, "", "")
+	conv, err := st.CreateConversation(1, "中途开联网", 0, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// 第一轮：没开联网 → 上游请求不带 tools
-	if _, _, err := mgr.SendMessage(context.Background(), conv.ID, "第一轮", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(context.Background(), 1, conv.ID, "第一轮", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitIdle(t, mgr, conv.ID)
@@ -224,12 +224,12 @@ func TestWebSearchToggleMidConversation(t *testing.T) {
 	}
 
 	// 中途打开联网开关（前端点按钮走的就是这条 PATCH 路径）
-	if _, err := mgr.PatchConversation(context.Background(), conv.ID, store.ConversationPatch{WebSearch: boolPtr(true)}); err != nil {
+	if _, err := mgr.PatchConversation(context.Background(), 1, conv.ID, store.ConversationPatch{WebSearch: boolPtr(true)}); err != nil {
 		t.Fatal(err)
 	}
 
 	// 第二轮：应带 tools，模型随即走「要求搜索 → 执行 → 续传」循环（两发都带 tools）
-	if _, _, err := mgr.SendMessage(context.Background(), conv.ID, "今天有什么新闻", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(context.Background(), 1, conv.ID, "今天有什么新闻", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitIdle(t, mgr, conv.ID)
@@ -303,14 +303,14 @@ func TestWebSearchRoundLimit(t *testing.T) {
 	t.Cleanup(searx.Close)
 	mgr.WithSearch(search.New(searx.URL))
 
-	conv, err := st.CreateConversation("熔断测试", 0, "", "")
+	conv, err := st.CreateConversation(1, "熔断测试", 0, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.UpdateConversation(conv.ID, store.ConversationPatch{WebSearch: boolPtr(true)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := mgr.SendMessage(context.Background(), conv.ID, "搜个不停", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(context.Background(), 1, conv.ID, "搜个不停", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	state := waitIdle(t, mgr, conv.ID)
@@ -354,19 +354,19 @@ func TestStopDuringSearch(t *testing.T) {
 	t.Cleanup(slow.Close)
 	mgr.WithSearch(search.New(slow.URL))
 
-	conv, err := st.CreateConversation("停止测试", 0, "", "")
+	conv, err := st.CreateConversation(1, "停止测试", 0, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.UpdateConversation(conv.ID, store.ConversationPatch{WebSearch: boolPtr(true)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := mgr.SendMessage(context.Background(), conv.ID, "今天有什么新闻", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(context.Background(), 1, conv.ID, "今天有什么新闻", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// 等第一段流（tool_calls）走完、进入搜索执行阶段
 	time.Sleep(100 * time.Millisecond)
-	stopped, err := mgr.Stop(context.Background(), conv.ID)
+	stopped, err := mgr.Stop(context.Background(), 1, conv.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

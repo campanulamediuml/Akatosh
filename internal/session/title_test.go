@@ -100,12 +100,12 @@ func TestTitleGeneratedByModel(t *testing.T) {
 	defer up.Close()
 	mgr, st := newTestManager(t, up.URL)
 
-	conv, err := st.CreateConversation("新对话", 0, "m-reason", "high")
+	conv, err := st.CreateConversation(1, "新对话", 0, "m-reason", "high")
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if _, _, err := mgr.SendMessage(ctx, conv.ID, "请详细讲讲 Go 的并发模型，越详细越好", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(ctx, 1, conv.ID, "请详细讲讲 Go 的并发模型，越详细越好", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	fin := waitIdle(t, mgr, conv.ID)
@@ -150,16 +150,16 @@ func TestTitleNotOverwrittenAfterRename(t *testing.T) {
 	defer up.Close()
 	mgr, st := newTestManager(t, up.URL)
 
-	conv, _ := st.CreateConversation("新对话", 0, "m-reason", "high")
+	conv, _ := st.CreateConversation(1, "新对话", 0, "m-reason", "high")
 	ctx := context.Background()
-	if _, _, err := mgr.SendMessage(ctx, conv.ID, "随便聊聊", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(ctx, 1, conv.ID, "随便聊聊", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitIdle(t, mgr, conv.ID)
 
 	// 请求还在飞的时候用户手动改名
 	mine := "我自己起的名字"
-	if _, err := mgr.PatchConversation(ctx, conv.ID, store.ConversationPatch{Title: &mine}); err != nil {
+	if _, err := mgr.PatchConversation(ctx, 1, conv.ID, store.ConversationPatch{Title: &mine}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -199,9 +199,9 @@ func TestTitleFallsBackWhenUpstreamFails(t *testing.T) {
 	defer up.Close()
 
 	mgr, st := newTestManager(t, up.URL)
-	conv, _ := st.CreateConversation("新对话", 0, "m-reason", "high")
+	conv, _ := st.CreateConversation(1, "新对话", 0, "m-reason", "high")
 	ctx := context.Background()
-	if _, _, err := mgr.SendMessage(ctx, conv.ID, "帮我看看这段代码有没有并发问题", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(ctx, 1, conv.ID, "帮我看看这段代码有没有并发问题", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	fin := waitIdle(t, mgr, conv.ID)
@@ -228,10 +228,10 @@ func TestTitleGeneratesOnlyOnce(t *testing.T) {
 	defer up.Close()
 	mgr, st := newTestManager(t, up.URL)
 
-	conv, _ := st.CreateConversation("新对话", 0, "m-reason", "high")
+	conv, _ := st.CreateConversation(1, "新对话", 0, "m-reason", "high")
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {
-		if _, _, err := mgr.SendMessage(ctx, conv.ID, fmt.Sprintf("第 %d 轮提问", i+1), 0, "", nil, nil, nil); err != nil {
+		if _, _, err := mgr.SendMessage(ctx, 1, conv.ID, fmt.Sprintf("第 %d 轮提问", i+1), 0, "", nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		waitIdle(t, mgr, conv.ID)

@@ -86,6 +86,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			time.Since(started).Milliseconds())
 
 		att, err := s.st.CreateAttachment(store.Attachment{
+			UserID: userOf(r).ID,
 			Hash:   saved.Hash,
 			Kind:   "image",
 			MIME:   saved.MIME,
@@ -145,7 +146,8 @@ func (s *Server) serveAttachment(w http.ResponseWriter, r *http.Request, thumb b
 		writeErr(w, http.StatusInternalServerError, "internal", "这个部署没有启用图片")
 		return
 	}
-	att, err := s.st.GetAttachment(id)
+	// 多租户：附件要么是自己上传的，要么挂在自己会话的消息上（哈希去重共享）
+	att, err := s.st.GetAttachmentForUser(id, userOf(r).ID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return

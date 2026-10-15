@@ -20,10 +20,11 @@ func NewError(code, msg string) *Error { return &Error{Code: code, Msg: msg} }
 
 func newErr(code, msg string) *Error { return NewError(code, msg) }
 
-// ClientFactory 按**供应商 id** 构造上游客户端。
+// ClientFactory 按（属主 userID, 供应商 id）构造上游客户端。
 // 做成函数是因为用户随时可能改 URL / Key，不能把客户端固定在启动时刻；
 // 带参数是因为一个部署可以配多个供应商，会话发到哪家由它自己的 provider_id 决定。
-type ClientFactory func(providerID int64) (*llm.Client, error)
+// userID 必须参与解析：providers 按用户隔离，拿不到别人供应商里的 apikey。
+type ClientFactory func(userID, providerID int64) (*llm.Client, error)
 
 // Store 是会话层需要的持久化能力。
 type Store interface {
@@ -48,14 +49,15 @@ type Store interface {
 	AutoTitle(convID int64) (string, bool, error)
 	FirstUserMessage(convID int64) (string, error)
 	SetConversationSummary(id int64, summary string, beforeMsgID int64) error
-	GetSetting(key string) (string, error)
+	GetSetting(userID int64, key string) (string, error)
 	// GetModelFor 必须带供应商：多供应商下同名模型是两条不同记录
 	GetModelFor(providerID int64, modelID string) (*store.Model, error)
 	FirstModelOfProvider(providerID int64) (*store.Model, error)
-	// ResolveProvider 给会话用的 provider_id 兜底（供应商被删了要回退到默认）
-	ResolveProvider(id int64) (*store.Provider, error)
+	// ResolveProvider 给会话用的 provider_id 兜底（供应商被删了要回退到该用户默认）
+	ResolveProvider(userID, id int64) (*store.Provider, error)
 	GeneratingConvIDs() (map[int64]bool, error)
 	// 附件（图片）
+	CountAttachmentsOwnedBy(ids []int64, userID int64) (int, error)
 	AttachToMessage(messageID int64, attachmentIDs []int64) error
 	CreateAttachment(a store.Attachment) (*store.Attachment, error)
 	GetAttachmentInConv(id, convID int64) (*store.Attachment, error)
@@ -63,6 +65,7 @@ type Store interface {
 	AttachmentsByMessageIDs(ids []int64) (map[int64][]store.Attachment, error)
 	GetMessageWithAttachments(id int64) (*store.Message, error)
 	// 文件（文档）
+	CountFilesOwnedBy(ids []int64, userID int64) (int, error)
 	CreateFile(f store.File) (*store.File, error)
 	GetFileInConv(id, convID int64) (*store.File, error)
 	AttachFileToMessage(messageID int64, fileIDs []int64) error
@@ -218,17 +221,17 @@ func (m *Manager) Bus() *Bus { return m.bus }
 // Store 返回持久化接口（分页等只读路径用）。
 func (m *Manager) Store() Store { return m.st }
 
-// clientFor 按供应商构造上游客户端。
-// providerID <= 0 时回退到默认供应商（会话的供应商被删了会走到这里）。
-func (m *Manager) clientFor(providerID int64) (*llm.Client, error) {
-	p, err := m.st.ResolveProvider(providerID)
+// clientFor 按供应商构造上游客户端（多租户：只能解析到 userID 自己的供应商）。
+// providerID <= 0 时回退到该用户的默认供应商（会话的供应商被删了会走到这里）。
+func (m *Manager) clientFor(userID, providerID int64) (*llm.Client, error) {
+	p, err := m.st.ResolveProvider(userID, providerID)
 	if err != nil {
 		return nil, newErr("internal", err.Error())
 	}
 	if p == nil || strings.TrimSpace(p.BaseURL) == "" {
 		return nil, newErr("no_provider", "还没有配置任何供应商，请先在设置里添加一个")
 	}
-	c, err := m.clientFn(p.ID)
+	c, err := m.clientFn(userID, p.ID)
 	if err != nil {
 		var se *Error
 		if errors.As(err, &se) {
@@ -237,6 +240,19 @@ func (m *Manager) clientFor(providerID int64) (*llm.Client, error) {
 		return nil, newErr("no_provider", err.Error())
 	}
 	return c, nil
+}
+
+// ownConversation 多租户的硬边界：一切命令入口先过这里。
+// 会话不是当前用户的，一律报 not_found——不暴露「有这条但是别人的」。
+func (m *Manager) ownConversation(convID, userID int64) error {
+	conv, err := m.st.GetConversation(convID)
+	if err != nil {
+		return newErr("internal", err.Error())
+	}
+	if conv == nil || conv.UserID != userID {
+		return errNotFound
+	}
+	return nil
 }
 
 // getOrCreate 惰性创建会话 goroutine（双检加锁，避免并发重复创建）。
@@ -323,7 +339,10 @@ func (m *Manager) call(ctx context.Context, convID int64, cmd command) (result, 
 // ---------- 对外 API ----------
 
 // State 返回会话的权威状态。
-func (m *Manager) State(ctx context.Context, convID int64) (*State, error) {
+func (m *Manager) State(ctx context.Context, userID, convID int64) (*State, error) {
+	if err := m.ownConversation(convID, userID); err != nil {
+		return nil, err
+	}
 	m.mu.Lock()
 	_, live := m.sessions[convID]
 	m.mu.Unlock()
@@ -365,7 +384,10 @@ func (m *Manager) State(ctx context.Context, convID int64) (*State, error) {
 // SendMessage 投递一条用户消息。会话忙时返回 busy 错误，消息被丢弃。
 // providerID/modelID 传 0/空 表示用会话自身的配置；attachmentIDs 是已上传的图片，
 // fileIDs 是已上传的文档（/api/files 返回的 id）。
-func (m *Manager) SendMessage(ctx context.Context, convID int64, content string, providerID int64, modelID string, effort *string, attachmentIDs []int64, fileIDs []int64) (int64, int64, error) {
+func (m *Manager) SendMessage(ctx context.Context, userID, convID int64, content string, providerID int64, modelID string, effort *string, attachmentIDs []int64, fileIDs []int64) (int64, int64, error) {
+	if err := m.ownConversation(convID, userID); err != nil {
+		return 0, 0, err
+	}
 	cmd := command{kind: cmdSend, content: content, providerID: providerID, modelID: modelID, attachmentIDs: attachmentIDs, fileIDs: fileIDs}
 	if effort != nil {
 		cmd.effort, cmd.effortSet = *effort, true
@@ -377,7 +399,10 @@ func (m *Manager) SendMessage(ctx context.Context, convID int64, content string,
 	return res.userMsgID, res.asstMsgID, nil
 }
 
-func (m *Manager) Stop(ctx context.Context, convID int64) (bool, error) {
+func (m *Manager) Stop(ctx context.Context, userID, convID int64) (bool, error) {
+	if err := m.ownConversation(convID, userID); err != nil {
+		return false, err
+	}
 	res, err := m.call(ctx, convID, command{kind: cmdStop})
 	if err != nil {
 		return false, err
@@ -385,8 +410,8 @@ func (m *Manager) Stop(ctx context.Context, convID int64) (bool, error) {
 	return res.stopped, nil
 }
 
-func (m *Manager) Regenerate(ctx context.Context, msgID int64) error {
-	convID, err := m.convOfMessage(msgID)
+func (m *Manager) Regenerate(ctx context.Context, userID, msgID int64) error {
+	convID, err := m.convOfMessageForUser(msgID, userID)
 	if err != nil {
 		return err
 	}
@@ -397,13 +422,16 @@ func (m *Manager) Regenerate(ctx context.Context, msgID int64) error {
 // Compact 手动触发一次上下文压缩（用户点「压缩当前上下文」按钮）。
 // 压缩是异步的：命令返回时压缩刚开始，进度通过 conv 状态（compacting）
 // 和 notice 广播到前端。
-func (m *Manager) Compact(ctx context.Context, convID int64) error {
+func (m *Manager) Compact(ctx context.Context, userID, convID int64) error {
+	if err := m.ownConversation(convID, userID); err != nil {
+		return err
+	}
 	_, err := m.call(ctx, convID, command{kind: cmdCompact})
 	return err
 }
 
-func (m *Manager) EditMessage(ctx context.Context, msgID int64, content string) (*store.Message, error) {
-	convID, err := m.convOfMessage(msgID)
+func (m *Manager) EditMessage(ctx context.Context, userID, msgID int64, content string) (*store.Message, error) {
+	convID, err := m.convOfMessageForUser(msgID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -415,8 +443,8 @@ func (m *Manager) EditMessage(ctx context.Context, msgID int64, content string) 
 }
 
 // EditMessageReasoning 编辑 CoT（reasoning 原文会被保留，可还原）。
-func (m *Manager) EditMessageReasoning(ctx context.Context, msgID int64, reasoning string) (*store.Message, error) {
-	convID, err := m.convOfMessage(msgID)
+func (m *Manager) EditMessageReasoning(ctx context.Context, userID, msgID int64, reasoning string) (*store.Message, error) {
+	convID, err := m.convOfMessageForUser(msgID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -427,8 +455,8 @@ func (m *Manager) EditMessageReasoning(ctx context.Context, msgID int64, reasoni
 	return res.message, nil
 }
 
-func (m *Manager) RestoreMessage(ctx context.Context, msgID int64) (*store.Message, error) {
-	convID, err := m.convOfMessage(msgID)
+func (m *Manager) RestoreMessage(ctx context.Context, userID, msgID int64) (*store.Message, error) {
+	convID, err := m.convOfMessageForUser(msgID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -440,8 +468,8 @@ func (m *Manager) RestoreMessage(ctx context.Context, msgID int64) (*store.Messa
 }
 
 // RestoreMessageReasoning 还原 CoT 到模型原文。
-func (m *Manager) RestoreMessageReasoning(ctx context.Context, msgID int64) (*store.Message, error) {
-	convID, err := m.convOfMessage(msgID)
+func (m *Manager) RestoreMessageReasoning(ctx context.Context, userID, msgID int64) (*store.Message, error) {
+	convID, err := m.convOfMessageForUser(msgID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -452,8 +480,8 @@ func (m *Manager) RestoreMessageReasoning(ctx context.Context, msgID int64) (*st
 	return res.message, nil
 }
 
-func (m *Manager) DeleteMessage(ctx context.Context, msgID int64) error {
-	convID, err := m.convOfMessage(msgID)
+func (m *Manager) DeleteMessage(ctx context.Context, userID, msgID int64) error {
+	convID, err := m.convOfMessageForUser(msgID, userID)
 	if err != nil {
 		return err
 	}
@@ -461,7 +489,16 @@ func (m *Manager) DeleteMessage(ctx context.Context, msgID int64) error {
 	return err
 }
 
-func (m *Manager) PatchConversation(ctx context.Context, convID int64, patch store.ConversationPatch) (*store.Conversation, error) {
+func (m *Manager) PatchConversation(ctx context.Context, userID, convID int64, patch store.ConversationPatch) (*store.Conversation, error) {
+	if err := m.ownConversation(convID, userID); err != nil {
+		return nil, err
+	}
+	// provider_id 换绑必须是自己的供应商，否则等于偷用别人的 apikey
+	if patch.ProviderID != nil && *patch.ProviderID > 0 {
+		if err := m.ownProvider(*patch.ProviderID, userID); err != nil {
+			return nil, err
+		}
+	}
 	res, err := m.call(ctx, convID, command{kind: cmdPatchConv, patch: patch})
 	if err != nil {
 		return nil, err
@@ -469,7 +506,10 @@ func (m *Manager) PatchConversation(ctx context.Context, convID int64, patch sto
 	return res.conv, nil
 }
 
-func (m *Manager) DeleteConversation(ctx context.Context, convID int64) error {
+func (m *Manager) DeleteConversation(ctx context.Context, userID, convID int64) error {
+	if err := m.ownConversation(convID, userID); err != nil {
+		return err
+	}
 	_, err := m.call(ctx, convID, command{kind: cmdDeleteConv})
 	return err
 }
@@ -487,7 +527,9 @@ func (m *Manager) ActiveByConv(convID int64) bool {
 	return gen[convID]
 }
 
-func (m *Manager) convOfMessage(msgID int64) (int64, error) {
+// convOfMessageForUser 把 msgID 解析成 convID 并顺带校验会话归属。
+// 消息/会话是别人的一律 not_found。
+func (m *Manager) convOfMessageForUser(msgID, userID int64) (int64, error) {
 	msg, err := m.st.GetMessage(msgID)
 	if err != nil {
 		return 0, newErr("internal", err.Error())
@@ -495,7 +537,22 @@ func (m *Manager) convOfMessage(msgID int64) (int64, error) {
 	if msg == nil {
 		return 0, errNotFound
 	}
+	if err := m.ownConversation(msg.ConvID, userID); err != nil {
+		return 0, err
+	}
 	return msg.ConvID, nil
+}
+
+// ownProvider 校验供应商归属（PATCH 会话换绑供应商时用）。
+func (m *Manager) ownProvider(providerID, userID int64) error {
+	p, err := m.st.ResolveProvider(userID, providerID)
+	if err != nil {
+		return newErr("internal", err.Error())
+	}
+	if p == nil || p.ID != providerID {
+		return newErr("not_found", "供应商不存在")
+	}
+	return nil
 }
 
 // Shutdown 让所有会话把正在进行的生成收尾落盘后退出。

@@ -64,13 +64,13 @@ func TestToolRoundsRecordedAndReplayed(t *testing.T) {
 	t.Cleanup(pybox.Close)
 	mgr.WithSandbox(sandbox.New(pybox.URL))
 
-	conv, err := st.CreateConversation("回放测试", 0, "", "")
+	conv, err := st.CreateConversation(1, "回放测试", 0, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// 第一轮：触发工具调用
-	if _, _, err := mgr.SendMessage(context.Background(), conv.ID, "6 乘以 7？用代码算", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(context.Background(), 1, conv.ID, "6 乘以 7？用代码算", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	state := waitIdle(t, mgr, conv.ID)
@@ -100,7 +100,7 @@ func TestToolRoundsRecordedAndReplayed(t *testing.T) {
 	}
 
 	// 第二轮：历史里应出现**完整 tool 结果**（全量回放），而不是文本摘要
-	if _, _, err := mgr.SendMessage(context.Background(), conv.ID, "那 8 乘 8 呢？也用代码", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(context.Background(), 1, conv.ID, "那 8 乘 8 呢？也用代码", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitIdle(t, mgr, conv.ID)

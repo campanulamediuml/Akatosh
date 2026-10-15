@@ -4,8 +4,12 @@
 /misc/
 /misc-*/
 
+# 运行时凭据
+/.runtime-token
+
 # 构建产物
 *.exe
+/ai-assistant-linux
 /web/node_modules/
 /web/dist/
 

@@ -82,7 +82,7 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "bad_request", "打开上传文件失败: "+err.Error())
 			return
 		}
-		rec, err := s.saveUploadedFile(f, fh.Filename, ext)
+		rec, err := s.saveUploadedFile(userOf(r).ID, f, fh.Filename, ext)
 		f.Close()
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
@@ -94,8 +94,8 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"files": out})
 }
 
-// saveUploadedFile 把上传内容按内容哈希落盘（去重），并登记 files 表。
-func (s *Server) saveUploadedFile(r io.Reader, name, ext string) (*store.File, error) {
+// saveUploadedFile 把上传内容按内容哈希落盘（去重），并登记 files 表（记录属主）。
+func (s *Server) saveUploadedFile(userID int64, r io.Reader, name, ext string) (*store.File, error) {
 	if err := os.MkdirAll(s.filesDir, 0o755); err != nil {
 		return nil, fmt.Errorf("文件目录不可用: %w", err)
 	}
@@ -131,6 +131,6 @@ func (s *Server) saveUploadedFile(r io.Reader, name, ext string) (*store.File, e
 		return nil, fmt.Errorf("设置文件权限失败: %w", err)
 	}
 	return s.st.CreateFile(store.File{
-		Hash: hash, Name: name, Ext: ext, Size: int(n),
+		UserID: userID, Hash: hash, Name: name, Ext: ext, Size: int(n),
 	})
 }

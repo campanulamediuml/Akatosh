@@ -53,7 +53,7 @@ func main() {
 	if autoToken {
 		token = httpapi.GenerateToken()
 		if token == "" {
-			log.Printf("警告：生成访问令牌失败，本次不启用鉴权")
+			log.Printf("警告：生成访问令牌失败，首个管理员将使用自动生成的令牌")
 		}
 	}
 
@@ -63,6 +63,13 @@ func main() {
 		log.Fatalf("打开数据库失败: %v", err)
 	}
 	defer st.Close()
+
+	// 多租户引导：users 表为空时用 -token（或自动生成）创建首个管理员，
+	// 并把单租户时代的全部数据划到其名下；之后鉴权完全走 users 表。
+	adminToken, adminCreated, err := st.BootstrapUsers(token)
+	if err != nil {
+		log.Fatalf("初始化用户体系失败: %v", err)
+	}
 
 	// 图片存储：misc 目录可以单独挂到外部卷
 	mediaStore, err := media.NewStore(*miscDir)
@@ -80,8 +87,8 @@ func main() {
 	bus := session.NewBus()
 	// 客户端是按「供应商 id」现构造的：用户随时可能改某家的 URL / Key，
 	// 而且一个部署可以配多家。
-	mgr := session.NewManagerWithMedia(st, bus, func(providerID int64) (*llm.Client, error) {
-		p, err := st.GetProviderByID(providerID)
+	mgr := session.NewManagerWithMedia(st, bus, func(userID, providerID int64) (*llm.Client, error) {
+		p, err := st.ResolveProvider(userID, providerID)
 		if err != nil {
 			return nil, err
 		}
@@ -128,7 +135,6 @@ func main() {
 
 	handler := httpapi.New(st, mgr, sub, version, *addr, mediaStore,
 		httpapi.WithFilesDir(filepath.Join(*miscDir, "files")),
-		httpapi.WithToken(token),
 		httpapi.WithAllowHosts(splitList(*allowHostFlag)),
 	)
 	httpServer := &http.Server{
@@ -168,19 +174,17 @@ func main() {
 
 	if handler.Exposed() {
 		log.Printf("  已绑到非回环地址：同网络的设备都能访问")
-		if handler.TokenEnabled() {
-			log.Printf("  访问令牌 : %s", token)
+		if adminCreated {
+			log.Printf("  管理员访问令牌 : %s", adminToken)
 			log.Printf("  手机上直接开这个地址即可（令牌只需用一次，之后靠 cookie）：")
 			for _, t := range urls {
 				if isLoopbackURL(t.url) {
 					continue
 				}
-				log.Printf("             %s/?token=%s", t.url, token)
+				log.Printf("             %s/?token=%s", t.url, adminToken)
 			}
 			log.Printf("  ⚠ 这行日志里含明文令牌，别往外贴")
-		} else {
-			log.Printf("  ⚠ 没有设置 -token：同网络任何人都能读写你的全部对话")
-			log.Printf("    建议：-token auto （自动生成并打印访问地址）")
+			log.Printf("  更多用户：管理员登录后在「设置 → 用户管理」里创建（每人一个令牌）")
 		}
 	}
 	log.Printf("  按 Ctrl+C 退出")

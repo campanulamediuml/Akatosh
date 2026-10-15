@@ -12,14 +12,14 @@ import (
 // 造一个带若干消息的会话（messages 内容形如 "m1"、"m2"…）
 func seedConv(t *testing.T, st *store.Store, n int) *store.Conversation {
 	t.Helper()
-	p, err := st.CreateProvider("p", "http://127.0.0.1:1/v1", "k")
+	p, err := st.CreateProvider(1, "p", "http://127.0.0.1:1/v1", "k")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.UpsertModels(p.ID, []store.Model{{ModelID: "m", Reasoning: true, Efforts: []string{"high"}, ContextLen: 10000}}); err != nil {
 		t.Fatal(err)
 	}
-	conv, err := st.CreateConversation("t", p.ID, "m", "")
+	conv, err := st.CreateConversation(1, "t", p.ID, "m", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,11 +98,11 @@ func TestFrozenMessagesRejected(t *testing.T) {
 	// 冻结消息（第 1 条）：编辑正文、编辑 CoT、还原、删除都应 archived
 	frozenID := msgs[0].ID
 	for name, fn := range map[string]error{
-		"edit":          func() error { _, e := mgr.EditMessage(context.Background(), frozenID, "x"); return e }(),
-		"editReasoning": func() error { _, e := mgr.EditMessageReasoning(context.Background(), frozenID, "x"); return e }(),
-		"restore":       func() error { _, e := mgr.RestoreMessage(context.Background(), frozenID); return e }(),
-		"restoreCot":    func() error { _, e := mgr.RestoreMessageReasoning(context.Background(), frozenID); return e }(),
-		"delete":        func() error { return mgr.DeleteMessage(context.Background(), frozenID) }(),
+		"edit":          func() error { _, e := mgr.EditMessage(context.Background(), 1, frozenID, "x"); return e }(),
+		"editReasoning": func() error { _, e := mgr.EditMessageReasoning(context.Background(), 1, frozenID, "x"); return e }(),
+		"restore":       func() error { _, e := mgr.RestoreMessage(context.Background(), 1, frozenID); return e }(),
+		"restoreCot":    func() error { _, e := mgr.RestoreMessageReasoning(context.Background(), 1, frozenID); return e }(),
+		"delete":        func() error { return mgr.DeleteMessage(context.Background(), 1, frozenID) }(),
 	} {
 		var se *Error
 		if fn == nil || !errorAs(fn, &se) || se.Code != "archived" {
@@ -110,7 +110,7 @@ func TestFrozenMessagesRejected(t *testing.T) {
 		}
 	}
 	// 未冻结消息（第 5 条）可以正常编辑
-	if _, err := mgr.EditMessage(context.Background(), msgs[4].ID, "新内容"); err != nil {
+	if _, err := mgr.EditMessage(context.Background(), 1, msgs[4].ID, "新内容"); err != nil {
 		t.Fatalf("未冻结消息编辑应成功: %v", err)
 	}
 }
@@ -136,7 +136,7 @@ func TestSendRejectedWhileCompacting(t *testing.T) {
 	conv := seedConv(t, st, 2)
 	mgr := NewManager(st, NewBus(), nil)
 	mgr.setCompacting(conv.ID, true)
-	_, _, err = mgr.SendMessage(context.Background(), conv.ID, "hi", 0, "", nil, nil, nil)
+	_, _, err = mgr.SendMessage(context.Background(), 1, conv.ID, "hi", 0, "", nil, nil, nil)
 	var se *Error
 	if err == nil || !errorAs(err, &se) || se.Code != "compacting" {
 		t.Fatalf("压缩中发送应返回 compacting，实际 %v", err)

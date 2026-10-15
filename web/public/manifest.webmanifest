@@ -1,6 +1,6 @@
 {
-  "name": "AI 助手",
-  "short_name": "AI 助手",
+  "name": "Akatosh",
+  "short_name": "Akatosh",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

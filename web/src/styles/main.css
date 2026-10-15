@@ -1,5 +1,5 @@
 /* ==========================================================================
-   AI 助手 — 全部样式（手写，无 UI 框架）
+   Akatosh — 全部样式（手写，无 UI 框架）
    主题：data-theme="dark"（默认） / "light"，配色克制，无渐变
    ========================================================================== */
 
@@ -2055,6 +2055,20 @@ a:hover {
   color: var(--text-muted);
   background: var(--bg-inset);
   border: 1px solid var(--border);
+}
+
+.notice--success code.token-code,
+.token-code {
+  display: inline-block;
+  max-width: 100%;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  user-select: all;
 }
 
 .notice__text {

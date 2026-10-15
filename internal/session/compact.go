@@ -59,7 +59,7 @@ const compactTimeout = 8 * time.Minute
 // 压缩是用户手动点的按钮，每个结局都必须有反馈——成功/失败/没有可压的内容，
 // 否则用户看到的永远是「开始压缩…」然后什么都没发生。
 func (s *Session) notifyCompact(level, text string) {
-	s.mgr.bus.Publish(EventNotice, func(seq int64) any {
+	s.mgr.bus.Publish(EventNotice, s.ownerID(), func(seq int64) any {
 		return NoticePayload{Seq: seq, ConvID: s.convID, Level: level, Text: text}
 	})
 }
@@ -143,7 +143,7 @@ func (s *Session) runCompact() {
 		target = 3000
 	}
 
-	cli, err := s.mgr.clientFor(conv.ProviderID)
+	cli, err := s.mgr.clientFor(conv.UserID, conv.ProviderID)
 	if err != nil {
 		log.Printf("[compact] 会话 %d 构造上游客户端失败: %v", s.convID, err)
 		s.notifyCompact("error", "压缩失败：构造模型客户端出错")
@@ -178,14 +178,14 @@ func (s *Session) runCompact() {
 	// 广播会话更新与提示。注意这是独立 goroutine：会话 goroutine 独占的字段
 	// （s.conv / s.lastSeq / refreshConv / publishConv）一律不能碰，
 	// 只能用线程安全的 store 和 bus。
-	s.mgr.bus.Publish(EventConv, func(seq int64) any {
+	s.mgr.bus.Publish(EventConv, s.ownerID(), func(seq int64) any {
 		conv, err := s.mgr.st.GetConversation(s.convID)
 		if err != nil || conv == nil {
 			return ConvPayload{Seq: seq, ConvID: s.convID, Action: ActionUpdated}
 		}
 		return ConvPayload{Seq: seq, ConvID: s.convID, Action: ActionUpdated, Conv: conv}
 	})
-	s.mgr.bus.Publish(EventNotice, func(seq int64) any {
+	s.mgr.bus.Publish(EventNotice, s.ownerID(), func(seq int64) any {
 		return NoticePayload{Seq: seq, ConvID: s.convID, Level: "info",
 			Text: "上下文已压缩：较早的消息已归档为摘要（只读），对话照常继续"}
 	})

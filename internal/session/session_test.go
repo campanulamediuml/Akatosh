@@ -66,7 +66,7 @@ func newTestManager(t *testing.T, upstream string) (*Manager, *store.Store) {
 	}
 	t.Cleanup(func() { st.Close() })
 
-	p, err := st.CreateProvider("test", upstream+"/v1", "k")
+	p, err := st.CreateProvider(1, "test", upstream+"/v1", "k")
 	if err != nil {
 		t.Fatalf("保存供应商失败: %v", err)
 	}
@@ -76,9 +76,9 @@ func newTestManager(t *testing.T, upstream string) (*Manager, *store.Store) {
 	}); err != nil {
 		t.Fatalf("写入模型失败: %v", err)
 	}
-	_ = st.SetSetting(store.SettingDefaultModel, "m-reason")
+	_ = st.SetSetting(1, store.SettingDefaultModel, "m-reason")
 
-	mgr := NewManager(st, NewBus(), func(providerID int64) (*llm.Client, error) {
+	mgr := NewManager(st, NewBus(), func(userID, providerID int64) (*llm.Client, error) {
 		pp, err := st.GetProviderByID(providerID)
 		if err != nil {
 			return nil, err
@@ -97,7 +97,7 @@ func waitIdle(t *testing.T, mgr *Manager, convID int64) *State {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		st, err := mgr.State(context.Background(), convID)
+		st, err := mgr.State(context.Background(), 1, convID)
 		if err != nil {
 			t.Fatalf("取状态失败: %v", err)
 		}
@@ -116,18 +116,18 @@ func TestBusyDiscardsExtraMessage(t *testing.T) {
 	defer up.Close()
 	mgr, st := newTestManager(t, up.URL)
 
-	conv, err := st.CreateConversation("t", 0, "m-reason", "high")
+	conv, err := st.CreateConversation(1, "t", 0, "m-reason", "high")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	ctx := context.Background()
-	if _, _, err := mgr.SendMessage(ctx, conv.ID, "第一条", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(ctx, 1, conv.ID, "第一条", 0, "", nil, nil, nil); err != nil {
 		t.Fatalf("第一条应当被接受: %v", err)
 	}
 
 	// 生成途中再发一条：必须被丢弃
-	_, _, err = mgr.SendMessage(ctx, conv.ID, "这条应被丢弃", 0, "", nil, nil, nil)
+	_, _, err = mgr.SendMessage(ctx, 1, conv.ID, "这条应被丢弃", 0, "", nil, nil, nil)
 	var se *Error
 	if !errors.As(err, &se) || se.Code != "busy" {
 		t.Fatalf("期望 busy 错误，实际 %v", err)
@@ -167,19 +167,19 @@ func TestStateReturnsLiveContent(t *testing.T) {
 	defer up.Close()
 	mgr, st := newTestManager(t, up.URL)
 
-	conv, err := st.CreateConversation("t", 0, "m-reason", "high")
+	conv, err := st.CreateConversation(1, "t", 0, "m-reason", "high")
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if _, _, err := mgr.SendMessage(ctx, conv.ID, "你好", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(ctx, 1, conv.ID, "你好", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 
 	// 等到已经有内容吐出来，但还远没到第一次落库（250ms）
 	time.Sleep(150 * time.Millisecond)
 
-	live, err := mgr.State(ctx, conv.ID)
+	live, err := mgr.State(ctx, 1, conv.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,15 +220,15 @@ func TestShutdownFlushesInFlight(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	p, _ := st.CreateProvider("test", up.URL+"/v1", "k")
+	p, _ := st.CreateProvider(1, "test", up.URL+"/v1", "k")
 	_, _ = st.UpsertModels(p.ID, []store.Model{{ModelID: "m-reason", Reasoning: true, Efforts: []string{"high"}}})
-	mgr := NewManager(st, NewBus(), func(providerID int64) (*llm.Client, error) {
+	mgr := NewManager(st, NewBus(), func(userID, providerID int64) (*llm.Client, error) {
 		return llm.New(up.URL+"/v1", "k"), nil
 	})
 
-	conv, _ := st.CreateConversation("t", 0, "m-reason", "high")
+	conv, _ := st.CreateConversation(1, "t", 0, "m-reason", "high")
 	ctx := context.Background()
-	if _, _, err := mgr.SendMessage(ctx, conv.ID, "你好", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(ctx, 1, conv.ID, "你好", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(150 * time.Millisecond) // 有内容了，但还没到第一次落库
@@ -310,18 +310,18 @@ func TestSwitchProviderMidStreamDoesNotReroute(t *testing.T) {
 	}
 	defer st.Close()
 
-	pa, err := st.CreateProvider("A", upA.URL+"/v1", "k")
+	pa, err := st.CreateProvider(1, "A", upA.URL+"/v1", "k")
 	if err != nil {
 		t.Fatal(err)
 	}
-	pb, err := st.CreateProvider("B", upB.URL+"/v1", "k")
+	pb, err := st.CreateProvider(1, "B", upB.URL+"/v1", "k")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, _ = st.UpsertModels(pa.ID, []store.Model{{ModelID: "model-a", Reasoning: true, Efforts: []string{"low"}}})
 	_, _ = st.UpsertModels(pb.ID, []store.Model{{ModelID: "model-b", Reasoning: false, Efforts: []string{}}})
 
-	mgr := NewManager(st, NewBus(), func(providerID int64) (*llm.Client, error) {
+	mgr := NewManager(st, NewBus(), func(userID, providerID int64) (*llm.Client, error) {
 		p, err := st.GetProviderByID(providerID)
 		if err != nil {
 			return nil, err
@@ -334,7 +334,7 @@ func TestSwitchProviderMidStreamDoesNotReroute(t *testing.T) {
 		mgr.Shutdown(ctx)
 	})
 
-	conv, err := st.CreateConversation("切供应商测试", pa.ID, "model-a", "low")
+	conv, err := st.CreateConversation(1, "切供应商测试", pa.ID, "model-a", "low")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +343,7 @@ func TestSwitchProviderMidStreamDoesNotReroute(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if _, _, err := mgr.SendMessage(ctx, conv.ID, "第一轮（走 A）", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(ctx, 1, conv.ID, "第一轮（走 A）", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// 等它确实开始流式了
@@ -353,7 +353,7 @@ func TestSwitchProviderMidStreamDoesNotReroute(t *testing.T) {
 	}
 
 	// 生成途中把会话切到 B
-	if _, err := mgr.PatchConversation(ctx, conv.ID, store.ConversationPatch{ProviderID: &pb.ID}); err != nil {
+	if _, err := mgr.PatchConversation(ctx, 1, conv.ID, store.ConversationPatch{ProviderID: &pb.ID}); err != nil {
 		t.Fatalf("切换供应商失败: %v", err)
 	}
 
@@ -387,7 +387,7 @@ func TestSwitchProviderMidStreamDoesNotReroute(t *testing.T) {
 	}
 
 	// 下一轮必须走 B
-	if _, _, err := mgr.SendMessage(ctx, conv.ID, "第二轮（应当走 B）", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(ctx, 1, conv.ID, "第二轮（应当走 B）", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitIdle(t, mgr, conv.ID)
@@ -478,20 +478,21 @@ func TestSendWithImageReachesUpstreamAsVisionContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	att, err := st.CreateAttachment(store.Attachment{
-		Hash: saved.Hash, Kind: "image", MIME: saved.MIME, Ext: saved.Ext,
+		UserID: 1,
+		Hash:   saved.Hash, Kind: "image", MIME: saved.MIME, Ext: saved.Ext,
 		Name: "shot.png", Size: saved.Size, Width: saved.Width, Height: saved.Height,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	pa, err := st.CreateProvider("vision", up.URL+"/v1", "k")
+	pa, err := st.CreateProvider(1, "vision", up.URL+"/v1", "k")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, _ = st.UpsertModels(pa.ID, []store.Model{{ModelID: "m-vision", Reasoning: false, Efforts: []string{}}})
 
-	mgr := NewManagerWithMedia(st, NewBus(), func(providerID int64) (*llm.Client, error) {
+	mgr := NewManagerWithMedia(st, NewBus(), func(userID, providerID int64) (*llm.Client, error) {
 		p, err := st.GetProviderByID(providerID)
 		if err != nil {
 			return nil, err
@@ -504,12 +505,12 @@ func TestSendWithImageReachesUpstreamAsVisionContent(t *testing.T) {
 		mgr.Shutdown(ctx)
 	})
 
-	conv, err := st.CreateConversation("带图测试", pa.ID, "m-vision", "medium")
+	conv, err := st.CreateConversation(1, "带图测试", pa.ID, "m-vision", "medium")
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if _, _, err := mgr.SendMessage(ctx, conv.ID, "这张图里是什么？", 0, "", nil, []int64{att.ID}, nil); err != nil {
+	if _, _, err := mgr.SendMessage(ctx, 1, conv.ID, "这张图里是什么？", 0, "", nil, []int64{att.ID}, nil); err != nil {
 		t.Fatal(err)
 	}
 	fin := waitIdle(t, mgr, conv.ID)
@@ -562,13 +563,14 @@ func TestSendWithOnlyImageIsAllowed(t *testing.T) {
 	_ = png.Encode(&buf, img)
 	saved, _ := mediaStore.Save(bytes.NewReader(buf.Bytes()), "tiny.png")
 	att, _ := st.CreateAttachment(store.Attachment{
-		Hash: saved.Hash, Kind: "image", MIME: saved.MIME, Ext: saved.Ext,
+		UserID: 1,
+		Hash:   saved.Hash, Kind: "image", MIME: saved.MIME, Ext: saved.Ext,
 		Name: "tiny.png", Size: saved.Size, Width: saved.Width, Height: saved.Height,
 	})
 
-	pa, _ := st.CreateProvider("p", up.URL+"/v1", "k")
+	pa, _ := st.CreateProvider(1, "p", up.URL+"/v1", "k")
 	_, _ = st.UpsertModels(pa.ID, []store.Model{{ModelID: "m", Reasoning: false}})
-	mgr := NewManagerWithMedia(st, NewBus(), func(int64) (*llm.Client, error) {
+	mgr := NewManagerWithMedia(st, NewBus(), func(userID, providerID int64) (*llm.Client, error) {
 		return llm.New(up.URL+"/v1", "k"), nil
 	}, mediaStore)
 	t.Cleanup(func() {
@@ -577,9 +579,9 @@ func TestSendWithOnlyImageIsAllowed(t *testing.T) {
 		mgr.Shutdown(ctx)
 	})
 
-	conv, _ := st.CreateConversation("只发图", pa.ID, "m", "medium")
+	conv, _ := st.CreateConversation(1, "只发图", pa.ID, "m", "medium")
 	ctx := context.Background()
-	if _, _, err := mgr.SendMessage(ctx, conv.ID, "", 0, "", nil, []int64{att.ID}, nil); err != nil {
+	if _, _, err := mgr.SendMessage(ctx, 1, conv.ID, "", 0, "", nil, []int64{att.ID}, nil); err != nil {
 		t.Fatalf("只发图应当被允许，实际报错: %v", err)
 	}
 	fin := waitIdle(t, mgr, conv.ID)
@@ -594,7 +596,7 @@ func TestSendWithOnlyImageIsAllowed(t *testing.T) {
 	}
 
 	// 内容和图都给空则应当被拒
-	if _, _, err := mgr.SendMessage(ctx, conv.ID, "   ", 0, "", nil, nil, nil); err == nil {
+	if _, _, err := mgr.SendMessage(ctx, 1, conv.ID, "   ", 0, "", nil, nil, nil); err == nil {
 		t.Fatal("内容和图都为空时应当报错")
 	}
 }
@@ -606,12 +608,12 @@ func TestFinishBumpsConversationTime(t *testing.T) {
 	defer up.Close()
 	mgr, st := newTestManager(t, up.URL)
 
-	conv, err := st.CreateConversation("置顶时机", 0, "m-reason", "high")
+	conv, err := st.CreateConversation(1, "置顶时机", 0, "m-reason", "high")
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if _, _, err := mgr.SendMessage(ctx, conv.ID, "第一轮", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(ctx, 1, conv.ID, "第一轮", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	// 刚发出去（还在生成）时的时间戳
@@ -635,9 +637,9 @@ func TestNoEffortForNonReasoningModel(t *testing.T) {
 	defer up.Close()
 	mgr, st := newTestManager(t, up.URL)
 
-	conv, _ := st.CreateConversation("t", 0, "m-plain", "high")
+	conv, _ := st.CreateConversation(1, "t", 0, "m-plain", "high")
 	ctx := context.Background()
-	if _, _, err := mgr.SendMessage(ctx, conv.ID, "你好", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(ctx, 1, conv.ID, "你好", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	fin := waitIdle(t, mgr, conv.ID)
@@ -671,10 +673,10 @@ func TestEditChangesHistory(t *testing.T) {
 	defer up.Close()
 
 	mgr, st := newTestManager(t, up.URL)
-	conv, _ := st.CreateConversation("t", 0, "m-reason", "high")
+	conv, _ := st.CreateConversation(1, "t", 0, "m-reason", "high")
 	ctx := context.Background()
 
-	if _, _, err := mgr.SendMessage(ctx, conv.ID, "原始提问", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(ctx, 1, conv.ID, "原始提问", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	fin := waitIdle(t, mgr, conv.ID)
@@ -685,10 +687,10 @@ func TestEditChangesHistory(t *testing.T) {
 			userMsgID = m.ID
 		}
 	}
-	if _, err := mgr.EditMessage(ctx, userMsgID, "改过的提问"); err != nil {
+	if _, err := mgr.EditMessage(ctx, 1, userMsgID, "改过的提问"); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := mgr.SendMessage(ctx, conv.ID, "接着聊", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(ctx, 1, conv.ID, "接着聊", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitIdle(t, mgr, conv.ID)
@@ -763,20 +765,21 @@ func TestAssistantImageNotSentUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 	att, err := st.CreateAttachment(store.Attachment{
-		Hash: saved.Hash, Kind: "image", MIME: saved.MIME, Ext: saved.Ext,
+		UserID: 1,
+		Hash:   saved.Hash, Kind: "image", MIME: saved.MIME, Ext: saved.Ext,
 		Name: "gen.png", Size: saved.Size, Width: saved.Width, Height: saved.Height,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	pa, err := st.CreateProvider("p", up.URL+"/v1", "k")
+	pa, err := st.CreateProvider(1, "p", up.URL+"/v1", "k")
 	if err != nil {
 		t.Fatal(err)
 	}
 	_, _ = st.UpsertModels(pa.ID, []store.Model{{ModelID: "m", Reasoning: false, Efforts: []string{}}})
 
-	mgr := NewManagerWithMedia(st, NewBus(), func(providerID int64) (*llm.Client, error) {
+	mgr := NewManagerWithMedia(st, NewBus(), func(userID, providerID int64) (*llm.Client, error) {
 		p, err := st.GetProviderByID(providerID)
 		if err != nil {
 			return nil, err
@@ -789,7 +792,7 @@ func TestAssistantImageNotSentUpstream(t *testing.T) {
 		mgr.Shutdown(ctx)
 	})
 
-	conv, err := st.CreateConversation("t", pa.ID, "m", "")
+	conv, err := st.CreateConversation(1, "t", pa.ID, "m", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -805,7 +808,7 @@ func TestAssistantImageNotSentUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := mgr.SendMessage(context.Background(), conv.ID, "再来一张", 0, "", nil, nil, nil); err != nil {
+	if _, _, err := mgr.SendMessage(context.Background(), 1, conv.ID, "再来一张", 0, "", nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitIdle(t, mgr, conv.ID)

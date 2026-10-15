@@ -9,6 +9,7 @@
  * - 底部小字显示 usage（全 0 时不显示）
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { api, toError } from '@/api/client'
 import type { Attachment, Message } from '@/api/types'
 import { EMPTY_USAGE } from '@/api/types'
 import MarkdownView from './MarkdownView.vue'
@@ -16,6 +17,7 @@ import MessageAttachments from './MessageAttachments.vue'
 import ReasoningBlock from './ReasoningBlock.vue'
 import SearchLogBlock from './SearchLogBlock.vue'
 import { useChatStore } from '@/stores/chat'
+import { useConversationsStore } from '@/stores/conversations'
 import { useSettingsStore } from '@/stores/settings'
 import { toast } from '@/stores/toast'
 import { copyText } from '@/utils/clipboard'
@@ -26,6 +28,7 @@ import { useThrottledText } from '@/utils/throttle'
 const props = defineProps<{ message: Message }>()
 
 const chat = useChatStore()
+const convs = useConversationsStore()
 const settings = useSettingsStore()
 
 const isUser = computed(() => props.message.role === 'user')
@@ -223,6 +226,30 @@ function onRegenerate(): void {
 function onDelete(): void {
   void chat.deleteMessage(props.message.id)
 }
+
+/**
+ * 从这条消息分叉：把「到这条为止」的历史（含这条）复制成新会话，
+ * 标题形如「原标题-消息{id}-fork」。已归档的冻结消息也能 fork
+ * （fork 是只读复制，不是修改）。
+ */
+const forking = ref(false)
+
+async function onFork(): Promise<void> {
+  const conv = chat.conv
+  if (!conv || forking.value) return
+  forking.value = true
+  try {
+    const res = await api.forkConversation(conv.id, props.message.id)
+    const title = res?.conv?.title ?? ''
+    toast.success(title ? `已分叉为「${title}」` : '已分叉')
+    await convs.refresh()
+    if (res?.conv?.id) convs.select(res.conv.id)
+  } catch (err) {
+    toast.error(`分叉失败：${toError(err).message}`)
+  } finally {
+    forking.value = false
+  }
+}
 </script>
 
 <template>
@@ -348,6 +375,19 @@ function onDelete(): void {
         {{ usageText }}<span v-if="usageDetail" class="msg__usage-detail">（{{ usageDetail }}）</span>
       </span>
       <span v-if="frozen" class="tag msg__frozen" title="这条消息已随上下文压缩归档，不能再修改">已归档</span>
+      <!-- 分叉按钮对冻结消息也可用：fork 是只读复制，不改原消息 -->
+      <button
+        v-if="frozen"
+        type="button"
+        class="icon-btn"
+        title="从这里分叉（复制到这条为止的历史开新分支）"
+        :disabled="forking"
+        @click="onFork"
+      >
+        <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">
+          <use href="#i-fork" />
+        </svg>
+      </button>
       <div v-else class="msg__tools">
         <button type="button" class="icon-btn" title="复制正文" @click="onCopy">
           <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">
@@ -374,6 +414,17 @@ function onDelete(): void {
         >
           <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">
             <use href="#i-refresh" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          class="icon-btn"
+          title="从这里分叉（复制到这条为止的历史开新分支）"
+          :disabled="forking"
+          @click="onFork"
+        >
+          <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">
+            <use href="#i-fork" />
           </svg>
         </button>
         <button

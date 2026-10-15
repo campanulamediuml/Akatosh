@@ -11,7 +11,7 @@ import (
 // ---------- 会话 ----------
 
 func (s *Server) handleListConversations(w http.ResponseWriter, r *http.Request) {
-	list, err := s.st.ListConversations()
+	list, err := s.st.ListConversations(userOf(r).ID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -42,14 +42,14 @@ func (s *Server) handleCreateConversation(w http.ResponseWriter, r *http.Request
 		return
 	}
 	// provider_id / model_id / effort 省略时由 store 套用设置里的默认值
-	conv, err := s.st.CreateConversation(body.Title, body.ProviderID, body.ModelID, body.Effort)
+	conv, err := s.st.CreateConversation(userOf(r).ID, body.Title, body.ProviderID, body.ModelID, body.Effort)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
 	// 新建会话还没有对应的 session goroutine，所以由这里直接广播，
 	// 让其它已打开的标签页也能立刻看到。
-	s.publishConv(session.ActionUpdated, conv)
+	s.publishConv(userOf(r).ID, session.ActionUpdated, conv)
 	writeJSON(w, http.StatusCreated, conv)
 }
 
@@ -75,7 +75,7 @@ func (s *Server) handlePatchConversation(w http.ResponseWriter, r *http.Request)
 		writeErr(w, http.StatusBadRequest, "bad_request", "provider_id 非法")
 		return
 	}
-	conv, err := s.mgr.PatchConversation(r.Context(), convID, store.ConversationPatch{
+	conv, err := s.mgr.PatchConversation(r.Context(), userOf(r).ID, convID, store.ConversationPatch{
 		Title:        body.Title,
 		ProviderID:   body.ProviderID,
 		ModelID:      body.ModelID,
@@ -97,7 +97,7 @@ func (s *Server) handleDeleteConversation(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
-	if err := s.mgr.DeleteConversation(r.Context(), convID); err != nil {
+	if err := s.mgr.DeleteConversation(r.Context(), userOf(r).ID, convID); err != nil {
 		writeDomainErr(w, err)
 		return
 	}
@@ -110,7 +110,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	st, err := s.mgr.State(r.Context(), convID)
+	st, err := s.mgr.State(r.Context(), userOf(r).ID, convID)
 	if err != nil {
 		writeDomainErr(w, err)
 		return
@@ -137,15 +137,15 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	userID, asstID, err := s.mgr.SendMessage(
-		r.Context(), convID, body.Content, body.ProviderID, body.ModelID, body.Effort, body.AttachmentIDs, body.FileIDs)
+	userMsgID, asstID, err := s.mgr.SendMessage(
+		r.Context(), userOf(r).ID, convID, body.Content, body.ProviderID, body.ModelID, body.Effort, body.AttachmentIDs, body.FileIDs)
 	if err != nil {
 		writeDomainErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"accepted":             true,
-		"user_message_id":      userID,
+		"user_message_id":      userMsgID,
 		"assistant_message_id": asstID,
 	})
 }
@@ -155,7 +155,7 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	stopped, err := s.mgr.Stop(r.Context(), convID)
+	stopped, err := s.mgr.Stop(r.Context(), userOf(r).ID, convID)
 	if err != nil {
 		writeDomainErr(w, err)
 		return
@@ -168,7 +168,7 @@ func (s *Server) handleRegenerate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.mgr.Regenerate(r.Context(), msgID); err != nil {
+	if err := s.mgr.Regenerate(r.Context(), userOf(r).ID, msgID); err != nil {
 		writeDomainErr(w, err)
 		return
 	}
@@ -195,14 +195,14 @@ func (s *Server) handleEditMessage(w http.ResponseWriter, r *http.Request) {
 	var msg *store.Message
 	var err error
 	if body.Content != nil {
-		msg, err = s.mgr.EditMessage(r.Context(), msgID, *body.Content)
+		msg, err = s.mgr.EditMessage(r.Context(), userOf(r).ID, msgID, *body.Content)
 		if err != nil {
 			writeDomainErr(w, err)
 			return
 		}
 	}
 	if body.Reasoning != nil {
-		msg, err = s.mgr.EditMessageReasoning(r.Context(), msgID, *body.Reasoning)
+		msg, err = s.mgr.EditMessageReasoning(r.Context(), userOf(r).ID, msgID, *body.Reasoning)
 		if err != nil {
 			writeDomainErr(w, err)
 			return
@@ -216,7 +216,7 @@ func (s *Server) handleRestoreMessage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	msg, err := s.mgr.RestoreMessage(r.Context(), msgID)
+	msg, err := s.mgr.RestoreMessage(r.Context(), userOf(r).ID, msgID)
 	if err != nil {
 		writeDomainErr(w, err)
 		return
@@ -230,7 +230,7 @@ func (s *Server) handleRestoreMessageReasoning(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
-	msg, err := s.mgr.RestoreMessageReasoning(r.Context(), msgID)
+	msg, err := s.mgr.RestoreMessageReasoning(r.Context(), userOf(r).ID, msgID)
 	if err != nil {
 		writeDomainErr(w, err)
 		return
@@ -243,7 +243,7 @@ func (s *Server) handleDeleteMessage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.mgr.DeleteMessage(r.Context(), msgID); err != nil {
+	if err := s.mgr.DeleteMessage(r.Context(), userOf(r).ID, msgID); err != nil {
 		writeDomainErr(w, err)
 		return
 	}
@@ -262,7 +262,15 @@ func (s *Server) handleForkConversation(w http.ResponseWriter, r *http.Request) 
 	}
 	// body 可空（整会话 fork）
 	_ = decodeJSON(w, r, &body)
-	conv, err := s.st.ForkConversation(convID, body.BeforeMessageID)
+	// fork 会全量复制历史（含 CoT），归属必须先校验：只能 fork 自己的会话
+	if srcConv, err := s.st.GetConversationForUser(convID, userOf(r).ID); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	} else if srcConv == nil {
+		writeErr(w, http.StatusNotFound, "not_found", "会话不存在")
+		return
+	}
+	conv, err := s.st.ForkConversation(convID, body.BeforeMessageID, userOf(r).ID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -271,7 +279,7 @@ func (s *Server) handleForkConversation(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusNotFound, "not_found", "会话不存在")
 		return
 	}
-	s.publishConv(session.ActionUpdated, conv)
+	s.publishConv(userOf(r).ID, session.ActionUpdated, conv)
 	writeJSON(w, http.StatusCreated, map[string]any{"conv": conv})
 }
 
@@ -282,7 +290,7 @@ func (s *Server) handleCompactConversation(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	if err := s.mgr.Compact(r.Context(), convID); err != nil {
+	if err := s.mgr.Compact(r.Context(), userOf(r).ID, convID); err != nil {
 		writeDomainErr(w, err)
 		return
 	}
@@ -296,11 +304,7 @@ func (s *Server) handleMarkRead(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := s.st.MarkConversationRead(convID); err != nil {
-		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
-		return
-	}
-	conv, err := s.st.GetConversation(convID)
+	conv, err := s.st.GetConversationForUser(convID, userOf(r).ID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 		return
@@ -309,13 +313,18 @@ func (s *Server) handleMarkRead(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "not_found", "会话不存在")
 		return
 	}
+	if err := s.st.MarkConversationRead(convID); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
 	// 广播出去：其它标签页的小红点也要跟着灭
-	s.publishConv(session.ActionUpdated, conv)
+	s.publishConv(userOf(r).ID, session.ActionUpdated, conv)
 	writeJSON(w, http.StatusOK, map[string]any{"conv": conv})
 }
 
 // publishConv 在会话层之外（新建会话、标记已读）广播会话变更。
-func (s *Server) publishConv(action string, conv *store.Conversation) {
+// userID 是事件属主：只推给这个用户的连接（多租户）。
+func (s *Server) publishConv(userID int64, action string, conv *store.Conversation) {
 	var convID int64
 	if conv != nil {
 		convID = conv.ID
@@ -328,7 +337,7 @@ func (s *Server) publishConv(action string, conv *store.Conversation) {
 		}
 		conv = &c
 	}
-	s.mgr.Bus().Publish(session.EventConv, func(seq int64) any {
+	s.mgr.Bus().Publish(session.EventConv, userID, func(seq int64) any {
 		return session.ConvPayload{Seq: seq, ConvID: convID, Action: action, Conv: conv}
 	})
 }
@@ -350,6 +359,13 @@ func (s *Server) handleListMessages(w http.ResponseWriter, r *http.Request) {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 100 {
 			limit = n
 		}
+	}
+	if conv, err := s.st.GetConversationForUser(convID, userOf(r).ID); err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	} else if conv == nil {
+		writeErr(w, http.StatusNotFound, "not_found", "会话不存在")
+		return
 	}
 	msgs, err := s.st.ListMessagesBefore(convID, before, limit)
 	if err != nil {

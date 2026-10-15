@@ -80,6 +80,26 @@ export interface SettingsDefaults {
  * GET /api/settings 与 PUT /api/settings/defaults 的响应（同形状）。
  * 注意 v2 里**没有**单个 `provider` 字段了：供应商是一张列表。
  */
+/* ------------------------------------------------------------------ */
+/* 用户（多租户）                                                        */
+/* ------------------------------------------------------------------ */
+
+/** 当前登录用户（GET /api/me） */
+export interface Me {
+  id: number
+  name: string
+  is_admin: boolean
+}
+
+/** 用户管理列表项（GET /api/users，管理员） */
+export interface UserInfo {
+  id: number
+  name: string
+  is_admin: boolean
+  created_at: number
+  last_seen_at: number
+}
+
 export interface SettingsResponse {
   /** 与 GET /api/providers 相同，省一次请求；按 id 升序 */
   providers: Provider[]

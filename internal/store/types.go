@@ -47,7 +47,9 @@ type Usage struct {
 // Provider 是一个 LLM 供应商配置。一个部署可以配任意多个。
 // APIKey 用 json:"-" 保证永远不会被序列化到任何响应里。
 type Provider struct {
-	ID        int64  `json:"id"`
+	ID int64 `json:"id"`
+	// UserID 属主：apikey 完全隔离，每个用户只能看到/使用自己的供应商
+	UserID    int64  `json:"-"`
 	Name      string `json:"name"`
 	BaseURL   string `json:"base_url"`
 	APIKey    string `json:"-"`
@@ -71,7 +73,9 @@ type Model struct {
 }
 
 type Conversation struct {
-	ID     int64  `json:"id"`
+	ID int64 `json:"id"`
+	// UserID 属主：多租户隔离的边界，所有读写路径都必须按它过滤/校验
+	UserID int64  `json:"-"`
 	Title  string `json:"title"`
 	Effort string `json:"effort"`
 	// 会话绑定到具体供应商：provider_id + model_id 一起决定发给谁。

@@ -9,13 +9,16 @@ import (
 // Attachment 是一份已经落盘的附件（当前只支持图片）。
 // 文件本体在 misc 目录里，这里只存元数据。
 type Attachment struct {
-	ID   int64  `json:"id"`
-	Hash string `json:"-"` // 内容 sha256，同时是文件名
-	Kind string `json:"kind"`
-	MIME string `json:"mime"`
-	Ext  string `json:"-"`
-	Name string `json:"name"`
-	Size int64  `json:"size"`
+	ID int64 `json:"id"`
+	// UserID 首个上传者（哈希去重下后来的上传者复用同一行；
+	// 读取校验用 GetAttachmentForUser：属主或「挂在本人会话消息上」都算可见）
+	UserID int64  `json:"-"`
+	Hash   string `json:"-"` // 内容 sha256，同时是文件名
+	Kind   string `json:"kind"`
+	MIME   string `json:"mime"`
+	Ext    string `json:"-"`
+	Name   string `json:"name"`
+	Size   int64  `json:"size"`
 	// 原图尺寸
 	Width     int   `json:"width"`
 	Height    int   `json:"height"`
@@ -28,11 +31,11 @@ type Attachment struct {
 	RawURL   string `json:"raw_url"`
 }
 
-const attachCols = `id, hash, kind, mime, ext, name, size, width, height, created_at`
+const attachCols = `id, user_id, hash, kind, mime, ext, name, size, width, height, created_at`
 
 func scanAttachment(sc interface{ Scan(...any) error }) (*Attachment, error) {
 	var a Attachment
-	if err := sc.Scan(&a.ID, &a.Hash, &a.Kind, &a.MIME, &a.Ext, &a.Name,
+	if err := sc.Scan(&a.ID, &a.UserID, &a.Hash, &a.Kind, &a.MIME, &a.Ext, &a.Name,
 		&a.Size, &a.Width, &a.Height, &a.CreatedAt); err != nil {
 		return nil, err
 	}
@@ -55,9 +58,9 @@ func (s *Store) CreateAttachment(a Attachment) (*Attachment, error) {
 		return prev, nil
 	}
 	res, err := s.db.Exec(
-		`INSERT INTO attachments(hash, kind, mime, ext, name, size, width, height, created_at)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		a.Hash, a.Kind, a.MIME, a.Ext, a.Name, a.Size, a.Width, a.Height, a.CreatedAt)
+		`INSERT INTO attachments(user_id, hash, kind, mime, ext, name, size, width, height, created_at)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		a.UserID, a.Hash, a.Kind, a.MIME, a.Ext, a.Name, a.Size, a.Width, a.Height, a.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -72,6 +75,35 @@ func (s *Store) GetAttachment(id int64) (*Attachment, error) {
 		return nil, nil
 	}
 	return a, err
+}
+
+// GetAttachmentForUser 按 id 取附件并校验可见性（多租户读取边界）：
+// 满足任一即可见——
+//  1. 当前用户是它的首个上传者（attachments.user_id）
+//  2. 它挂在当前用户自己会话的某条消息上（哈希去重后别的用户先传了同一张图，
+//     本用户上传时复用了那行记录并挂到自己消息上，当然有权看）
+//
+// 其它情况返回 (nil, nil)，表现得像不存在。
+func (s *Store) GetAttachmentForUser(id, userID int64) (*Attachment, error) {
+	a, err := s.GetAttachment(id)
+	if err != nil || a == nil {
+		return a, err
+	}
+	if a.UserID == userID {
+		return a, nil
+	}
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM message_attachments ma
+		   JOIN messages m ON m.id = ma.message_id
+		   JOIN conversations c ON c.id = m.conv_id
+		  WHERE ma.attachment_id = ? AND c.user_id = ?`, id, userID).Scan(&n); err != nil {
+		return nil, err
+	}
+	if n == 0 {
+		return nil, nil
+	}
+	return a, nil
 }
 
 func (s *Store) GetAttachmentByHash(hash string) (*Attachment, error) {
@@ -155,7 +187,7 @@ func (s *Store) AttachmentsByMessageIDs(ids []int64) (map[int64][]Attachment, er
 	for rows.Next() {
 		var mid int64
 		var a Attachment
-		if err := rows.Scan(&mid, &a.ID, &a.Hash, &a.Kind, &a.MIME, &a.Ext, &a.Name,
+		if err := rows.Scan(&mid, &a.ID, &a.UserID, &a.Hash, &a.Kind, &a.MIME, &a.Ext, &a.Name,
 			&a.Size, &a.Width, &a.Height, &a.CreatedAt); err != nil {
 			return nil, err
 		}
@@ -258,7 +290,7 @@ func itoa(n int64) string { return strconv.FormatInt(n, 10) }
 // （read_attachment 工具的归属校验：不许跨会话读图）。
 func (s *Store) GetAttachmentInConv(id, convID int64) (*Attachment, error) {
 	row := s.db.QueryRow(
-		`SELECT a.id, a.hash, a.kind, a.mime, a.ext, a.name, a.size, a.width, a.height, a.created_at
+		`SELECT a.id, a.user_id, a.hash, a.kind, a.mime, a.ext, a.name, a.size, a.width, a.height, a.created_at
 		   FROM attachments a
 		   JOIN message_attachments ma ON ma.attachment_id = a.id
 		   JOIN messages m ON m.id = ma.message_id
@@ -268,4 +300,27 @@ func (s *Store) GetAttachmentInConv(id, convID int64) (*Attachment, error) {
 		return nil, nil
 	}
 	return a, err
+}
+
+// CountAttachmentsOwnedBy 数这批附件 id 里有多少条属于指定用户（含哈希去重共享的）：
+// 归属 = 首个上传者，或挂在该用户会话的消息上。发消息挂图前的越权校验用。
+func (s *Store) CountAttachmentsOwnedBy(ids []int64, userID int64) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	var n int
+	q := `SELECT COUNT(DISTINCT a.id) FROM attachments a
+	       WHERE a.id IN (` + placeholders(len(ids)) + `)
+	         AND (a.user_id = ? OR EXISTS(
+	           SELECT 1 FROM message_attachments ma
+	             JOIN messages m ON m.id = ma.message_id
+	             JOIN conversations c ON c.id = m.conv_id
+	            WHERE ma.attachment_id = a.id AND c.user_id = ?))`
+	args := make([]any, 0, len(ids)+2)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	args = append(args, userID, userID)
+	err := s.db.QueryRow(q, args...).Scan(&n)
+	return n, err
 }

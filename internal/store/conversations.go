@@ -13,7 +13,7 @@ import (
 // unread 是算出来的，不是存出来的：只要存在「比你上次查看更新的、已经答完的」
 // 助手消息就算未读。只认 finished_at > 0 的（正在生成的那条不算），
 // 所以红点是在**答完那一刻**才亮的。
-const convCols = `c.id, c.title, c.effort, c.provider_id,
+const convCols = `c.id, c.user_id, c.title, c.effort, c.provider_id,
 	COALESCE((SELECT p.name FROM providers p WHERE p.id = c.provider_id), '') AS provider_name,
 	c.model_id, c.system_prompt, c.web_search, c.pinned, c.archived,
 	c.summary, c.compacted_before,
@@ -24,7 +24,7 @@ const convCols = `c.id, c.title, c.effort, c.provider_id,
 func scanConv(sc interface{ Scan(...any) error }) (*Conversation, error) {
 	var c Conversation
 	var pinned, archived, unread, webSearch int
-	if err := sc.Scan(&c.ID, &c.Title, &c.Effort, &c.ProviderID, &c.ProviderName,
+	if err := sc.Scan(&c.ID, &c.UserID, &c.Title, &c.Effort, &c.ProviderID, &c.ProviderName,
 		&c.ModelID, &c.SystemPrompt, &webSearch, &pinned, &archived,
 		&c.Summary, &c.CompactedBefore,
 		&c.MessageCount, &c.CreatedAt, &c.UpdatedAt, &c.LastReadAt, &unread); err != nil {
@@ -37,10 +37,11 @@ func scanConv(sc interface{ Scan(...any) error }) (*Conversation, error) {
 	return &c, nil
 }
 
-func (s *Store) ListConversations() ([]Conversation, error) {
+// ListConversations 返回某个用户的全部会话（多租户：严格按属主过滤）。
+func (s *Store) ListConversations(userID int64) ([]Conversation, error) {
 	rows, err := s.db.Query(
-		`SELECT ` + convCols + ` FROM conversations c
-		 ORDER BY c.pinned DESC, c.updated_at DESC, c.id DESC`)
+		`SELECT `+convCols+` FROM conversations c WHERE c.user_id = ?
+		 ORDER BY c.pinned DESC, c.updated_at DESC, c.id DESC`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -56,6 +57,8 @@ func (s *Store) ListConversations() ([]Conversation, error) {
 	return out, rows.Err()
 }
 
+// GetConversation 按 id 取会话（不做归属校验——给已完成校验的内部路径用，
+// 比如 session goroutine 按 convID 反查）。
 func (s *Store) GetConversation(id int64) (*Conversation, error) {
 	row := s.db.QueryRow(`SELECT `+convCols+` FROM conversations c WHERE c.id = ?`, id)
 	c, err := scanConv(row)
@@ -65,18 +68,31 @@ func (s *Store) GetConversation(id int64) (*Conversation, error) {
 	return c, err
 }
 
+// GetConversationForUser 按 id 取会话并校验归属：别人的会话返回 (nil, nil)，
+// 对外表现得像不存在，不泄露「有这条但不是你的」。
+func (s *Store) GetConversationForUser(id, userID int64) (*Conversation, error) {
+	c, err := s.GetConversation(id)
+	if err != nil || c == nil {
+		return c, err
+	}
+	if c.UserID != userID {
+		return nil, nil
+	}
+	return c, nil
+}
+
 // CreateConversation 建会话。providerID/modelID 为 0/空 时套用设置里的默认值。
 // 注意：全局默认 system prompt 是注入式（buildHistory 每轮现读），
 // 创建时不再复制进会话（避免和注入重复）。
-func (s *Store) CreateConversation(title string, providerID int64, modelID, effort string) (*Conversation, error) {
+func (s *Store) CreateConversation(userID int64, title string, providerID int64, modelID, effort string) (*Conversation, error) {
 	if title == "" {
 		title = DefaultTitle
 	}
-	pid, mid, eff := s.ResolveDefaults(providerID, modelID, effort)
+	pid, mid, eff := s.ResolveDefaults(userID, providerID, modelID, effort)
 	now := NowMs()
 	res, err := s.db.Exec(
-		`INSERT INTO conversations(title, provider_id, model_id, effort, created_at, updated_at)
-		 VALUES(?, ?, ?, ?, ?, ?)`, title, pid, mid, eff, now, now)
+		`INSERT INTO conversations(user_id, title, provider_id, model_id, effort, created_at, updated_at)
+		 VALUES(?, ?, ?, ?, ?, ?, ?)`, userID, title, pid, mid, eff, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -87,24 +103,31 @@ func (s *Store) CreateConversation(title string, providerID int64, modelID, effo
 // ResolveDefaults 把「可能为空的会话配置」补成一套能用的值：
 // 供应商取设置里的默认（再退回第一条），模型取设置里的默认（再退回该供应商下第一个），
 // 思考强度取设置里的默认（再退回 "medium"）。
-func (s *Store) ResolveDefaults(providerID int64, modelID, effort string) (int64, string, string) {
+// 供应商归属校验：指定了 providerID 但不属于这个用户时静默回退到默认，
+// 绝不把会话绑到别人的供应商上（那是偷用别人 apikey 的通道）。
+func (s *Store) ResolveDefaults(userID, providerID int64, modelID, effort string) (int64, string, string) {
 	pid := providerID
+	if pid > 0 {
+		if p, err := s.GetProviderForUser(pid, userID); err != nil || p == nil {
+			pid = 0
+		}
+	}
 	if pid <= 0 {
-		if v, _ := s.GetSetting(SettingDefaultProvider); v != "" {
+		if v, _ := s.GetSetting(userID, SettingDefaultProvider); v != "" {
 			if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
 				pid = n
 			}
 		}
 	}
 	if pid <= 0 {
-		if p, err := s.FirstProvider(); err == nil && p != nil {
+		if p, err := s.FirstProvider(userID); err == nil && p != nil {
 			pid = p.ID
 		}
 	}
 
 	mid := modelID
 	if mid == "" {
-		if v, _ := s.GetSetting(SettingDefaultModel); v != "" {
+		if v, _ := s.GetSetting(userID, SettingDefaultModel); v != "" {
 			// 默认模型必须属于这个供应商，否则会被静默发错地方
 			if m, err := s.GetModelFor(pid, v); err == nil && m != nil {
 				mid = v
@@ -119,7 +142,7 @@ func (s *Store) ResolveDefaults(providerID int64, modelID, effort string) (int64
 
 	eff := effort
 	if eff == "" {
-		if v, _ := s.GetSetting(SettingDefaultEffort); v != "" {
+		if v, _ := s.GetSetting(userID, SettingDefaultEffort); v != "" {
 			eff = v
 		} else {
 			eff = DefaultEffort
@@ -290,35 +313,53 @@ func (s *Store) SetConversationSummary(id int64, summary string, beforeMsgID int
 }
 
 // ForkConversation 从 beforeMsgID（含）之前的历史全量值复制出一个新会话：
-// conversations / messages / message_attachments 三表各复制一段，
+// conversations / messages / message_attachments / message_files 四表各复制一段，
 // reasoning、search_log、usage、编辑标记、summary、compacted_before 全部带走。
-// beforeMsgID = 0 表示复制整个会话。
-// 图片本体不复制——attachments 按内容哈希去重，新消息只复制关联行（共享同一份图）。
-// 新会话标题 = 原标题 + "-fork"。
-func (s *Store) ForkConversation(convID, beforeMsgID int64) (*Conversation, error) {
+// beforeMsgID = 0 表示复制整个会话（= 从最后一条消息分叉）。
+// 图片/文档本体不复制——按内容哈希去重，新消息只复制关联行（共享同一份）。
+// 新会话标题 = 原标题 + "-消息{id}-fork"（分叉锚点一目了然）。
+// 注意：fork 出的新会话属于 newUserID（可以是别的用户把分享链接 fork 走？
+// —— 当前只允许 fork 自己的会话，归属校验在 httpapi 层做）。
+func (s *Store) ForkConversation(convID, beforeMsgID, newUserID int64) (*Conversation, error) {
 	src, err := s.GetConversation(convID)
 	if err != nil || src == nil {
 		return nil, err
 	}
+
+	msgs, err := s.ListMessages(convID)
+	if err != nil {
+		return nil, err
+	}
+	// beforeMsgID = 0：锚到最后一条消息（整会话分叉 = 从最后一条分叉的子集）
+	if beforeMsgID <= 0 && len(msgs) > 0 {
+		beforeMsgID = msgs[len(msgs)-1].ID
+	}
+	// 锚点必须在会话里真实存在，否则静默 fork 出空会话
+	anchor := int64(0)
+	for _, m := range msgs {
+		if m.ID <= beforeMsgID {
+			anchor = m.ID
+		}
+	}
+	if anchor == 0 {
+		return nil, nil
+	}
+
 	now := NowMs()
 	res, err := s.db.Exec(
-		`INSERT INTO conversations(title, provider_id, model_id, effort, system_prompt, web_search, summary, compacted_before, created_at, updated_at, last_read_at)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		src.Title+"-fork", src.ProviderID, src.ModelID, src.Effort, src.SystemPrompt,
+		`INSERT INTO conversations(user_id, title, provider_id, model_id, effort, system_prompt, web_search, summary, compacted_before, created_at, updated_at, last_read_at)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		newUserID, fmt.Sprintf("%s-消息%d-fork", src.Title, anchor), src.ProviderID, src.ModelID, src.Effort, src.SystemPrompt,
 		b2i(src.WebSearch), src.Summary, src.CompactedBefore, now, now, now)
 	if err != nil {
 		return nil, err
 	}
 	newID, _ := res.LastInsertId()
 
-	msgs, err := s.ListMessages(convID)
-	if err != nil {
-		return nil, err
-	}
-	// 旧消息 id → 新消息 id，用来复制附件关联
+	// 旧消息 id → 新消息 id，用来复制附件/文件关联
 	idMap := map[int64]int64{}
 	for _, m := range msgs {
-		if beforeMsgID > 0 && m.ID > beforeMsgID {
+		if m.ID > anchor {
 			continue
 		}
 		status := m.Status
@@ -351,6 +392,19 @@ func (s *Store) ForkConversation(convID, beforeMsgID int64) (*Conversation, erro
 				`INSERT OR IGNORE INTO message_attachments(message_id, attachment_id, seq)
 				 VALUES(?, ?, (SELECT COALESCE(MAX(seq),0)+1 FROM message_attachments WHERE message_id = ?))`,
 				newMsgID, a.ID, newMsgID); err != nil {
+				return nil, err
+			}
+		}
+		// 文档关联：同样只复制关联行，原始文件按哈希共享
+		files, err := s.ListFiles(oldID)
+		if err != nil {
+			return nil, err
+		}
+		for _, f := range files {
+			if _, err := s.db.Exec(
+				`INSERT OR IGNORE INTO message_files(message_id, file_id, seq)
+				 VALUES(?, ?, (SELECT COALESCE(MAX(seq),0)+1 FROM message_files WHERE message_id = ?))`,
+				newMsgID, f.ID, newMsgID); err != nil {
 				return nil, err
 			}
 		}
