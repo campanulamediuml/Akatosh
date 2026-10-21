@@ -21,6 +21,11 @@
         <ellipse cx="8" cy="8" rx="2.9" ry="6.2" fill="none" stroke="currentColor" stroke-width="1.1" />
         <path d="M1.9 6.3h12.2M1.9 9.7h12.2" fill="none" stroke="currentColor" stroke-width="1.1" />
       </symbol>
+      <symbol id="i-search" viewBox="0 0 16 16">
+        <!-- 放大镜：会话内全文搜索 -->
+        <circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.4" />
+        <path d="M10.5 10.5L14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+      </symbol>
       <symbol id="i-code" viewBox="0 0 16 16">
         <path d="M5.5 4.5L1.8 8l3.7 3.5M10.5 4.5L14.2 8l-3.7 3.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
       </symbol>

@@ -257,6 +257,7 @@ async function onFork(): Promise<void> {
     ref="rootEl"
     class="msg"
     :class="isUser ? 'msg--user' : 'msg--assistant'"
+    :data-msg-id="message.id"
     :style="!visible && placeholderH ? { minHeight: placeholderH + 'px' } : undefined"
   >
     <header class="msg__head">

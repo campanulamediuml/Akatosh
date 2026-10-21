@@ -239,3 +239,55 @@ func (s *Store) ListMessagesBefore(convID, beforeID int64, limit int) ([]Message
 	}
 	return out, rows.Err()
 }
+
+// SearchHit 是一次消息搜索的命中：每个会话取最新一条。
+type SearchHit struct {
+	MessageID  int64
+	ConvID     int64
+	Title      string
+	Role       string
+	Content    string
+	Reasoning  string
+	CreatedAt  int64
+	MatchCount int
+}
+
+// SearchMessages 在某个用户的全部会话里按子串搜索正文和思维链（含已归档，
+// 不含 summary）。多租户硬边界：只搜 userID 自己的会话。
+// like 由调用方按 %...% 组好（含转义）；limit 是返回的会话数上限。
+func (s *Store) SearchMessages(userID int64, like string, limit int) ([]SearchHit, error) {
+	rows, err := s.db.Query(
+		`SELECT m.id, m.conv_id, c.title, m.role, m.content, m.reasoning, m.created_at,
+		        (SELECT COUNT(*) FROM messages m2
+		          WHERE m2.conv_id = m.conv_id
+		            AND (m2.content LIKE ? ESCAPE '\' OR m2.reasoning LIKE ? ESCAPE '\')) AS match_count
+		   FROM messages m
+		   JOIN conversations c ON c.id = m.conv_id
+		  WHERE c.user_id = ?
+		    AND (m.content LIKE ? ESCAPE '\' OR m.reasoning LIKE ? ESCAPE '\')
+		  ORDER BY m.id DESC`,
+		like, like, userID, like, like)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	seen := map[int64]bool{}
+	out := []SearchHit{}
+	for rows.Next() {
+		var h SearchHit
+		if err := rows.Scan(&h.MessageID, &h.ConvID, &h.Title, &h.Role,
+			&h.Content, &h.Reasoning, &h.CreatedAt, &h.MatchCount); err != nil {
+			return nil, err
+		}
+		if seen[h.ConvID] {
+			continue
+		}
+		seen[h.ConvID] = true
+		out = append(out, h)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, rows.Err()
+}

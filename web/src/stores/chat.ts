@@ -15,6 +15,7 @@
  */
 
 import { defineStore } from 'pinia'
+import { nextTick } from 'vue'
 import { api, errorCode, toError } from '@/api/client'
 import type {
   Conversation,
@@ -459,6 +460,45 @@ export const useChatStore = defineStore('chat', {
       } finally {
         this.loadingOlder = false
       }
+    },
+
+    /**
+     * 跳到某条具体消息（搜索结果点击用）：
+     * 先开会话，再按分页一直往上翻到目标消息出现，最后滚动过去并短暂高亮。
+     * 已归档的冻结消息同样能跳（它们只是只读，不是不存在）。
+     */
+    async openMessage(convId: number, messageId: number): Promise<boolean> {
+      await this.openConversation(convId)
+      // 目标可能远早于首屏：最多翻 100 页，防死循环
+      for (let i = 0; i < 100; i++) {
+        if (this.messages.some((m) => m.id === messageId)) break
+        if (!this.hasMore) break
+        const loaded = await this.loadOlder()
+        if (!loaded) break
+      }
+      if (!this.messages.some((m) => m.id === messageId)) {
+        toast.error('那条消息没能加载出来')
+        return false
+      }
+      await nextTick()
+      const el = document.querySelector(`[data-msg-id="${messageId}"]`)
+      if (el) {
+        // 必须 instant：smooth 滚动期间懒挂载会不断改变布局高度，动画永远追不上目标。
+        // 先立即滚到位，挂载稳定后再补一次校正。
+        // 每次滚动后手动派发一次 scroll：让 MessageList 重新计算 atBottom=false，
+        // 否则 loadOlder 触发的「贴底跟随」会把我们刚滚到的位置顶回去。
+        const sc = el.closest('.msglist')
+        const stick = () => {
+          // 对齐消息顶部而不是居中：长消息居中会把开头顶出屏幕，搜索结果没法读
+          el.scrollIntoView({ block: 'start' })
+          sc?.dispatchEvent(new Event('scroll'))
+        }
+        stick()
+        window.setTimeout(stick, 300)
+        el.classList.add('msg--flash')
+        window.setTimeout(() => el.classList.remove('msg--flash'), 2400)
+      }
+      return true
     },
 
     /* ------------------------------------------------------------ */

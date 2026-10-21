@@ -10,8 +10,9 @@
  */
 import { nextTick, ref } from 'vue'
 import type { ComponentPublicInstance } from 'vue'
-import type { Conversation } from '@/api/types'
-import { api } from '@/api/client'
+import type { Conversation, SearchResult } from '@/api/types'
+import { api, toError } from '@/api/client'
+import { useChatStore } from '@/stores/chat'
 import { useConversationsStore } from '@/stores/conversations'
 import { toast } from '@/stores/toast'
 import { relativeTime } from '@/utils/format'
@@ -20,6 +21,7 @@ import SystemPromptDialog from './SystemPromptDialog.vue'
 const emit = defineEmits<{ (e: 'toggle'): void; (e: 'open-settings'): void }>()
 
 const convs = useConversationsStore()
+const chat = useChatStore()
 
 const renamingId = ref<number | null>(null)
 const renameDraft = ref('')
@@ -129,6 +131,39 @@ function doDelete(id: number): void {
   confirmId.value = null
   void convs.remove(id)
 }
+
+/* ---------------- 消息全文搜索 ---------------- */
+
+const searchText = ref('')
+const searching = ref(false)
+/** 是否处于「搜索结果视图」（true 时列表区显示结果而不是会话列表） */
+const searchActive = ref(false)
+const searchResults = ref<SearchResult[]>([])
+
+async function onSearch(): Promise<void> {
+  const q = searchText.value.trim()
+  if (!q || searching.value) return
+  searching.value = true
+  try {
+    searchResults.value = await api.searchMessages(q)
+    searchActive.value = true
+  } catch (err) {
+    toast.error(`搜索失败：${toError(err).message}`)
+  } finally {
+    searching.value = false
+  }
+}
+
+function clearSearch(): void {
+  searchActive.value = false
+  searchResults.value = []
+  searchText.value = ''
+}
+
+/** 点结果：跳转到那条消息（已归档的也能跳）。窄屏抽屉由 App 的选中监听自动收起 */
+async function onJump(r: SearchResult): Promise<void> {
+  await chat.openMessage(r.conv_id, r.message_id)
+}
 </script>
 
 <template>
@@ -160,7 +195,51 @@ function doDelete(id: number): void {
       新对话
     </button>
 
-    <nav class="sidebar__list" aria-label="会话列表">
+    <!-- 消息全文搜索：输入关键字 → 放大镜/回车；结果视图可一键返回会话列表 -->
+    <form class="sidebar__search" @submit.prevent="onSearch">
+      <input
+        v-model="searchText"
+        class="input"
+        type="search"
+        placeholder="搜索聊天记录（含已归档）…"
+        autocomplete="off"
+        spellcheck="false"
+      />
+      <button
+        type="submit"
+        class="icon-btn"
+        title="搜索"
+        :disabled="searching || !searchText.trim()"
+        @click.stop
+      >
+        <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">
+          <use href="#i-search" />
+        </svg>
+      </button>
+    </form>
+
+    <div v-if="searchActive" class="sidebar__results">
+      <div class="sidebar__results-head">
+        <span>{{ searchResults.length }} 个会话有匹配</span>
+        <button type="button" class="btn btn--sm btn--ghost" @click="clearSearch">返回列表</button>
+      </div>
+      <div v-if="searchResults.length === 0" class="sidebar__empty">没有匹配的聊天记录</div>
+      <div
+        v-for="r in searchResults"
+        :key="r.conv_id"
+        class="searchhit"
+        :title="`跳转到「${r.title}」的这条消息`"
+        @click="onJump(r)"
+      >
+        <div class="searchhit__title">
+          <span class="searchhit__name">{{ r.title }}</span>
+          <span class="searchhit__count">{{ r.match_count }} 处</span>
+        </div>
+        <div class="searchhit__snippet">{{ r.snippet }}</div>
+      </div>
+    </div>
+
+    <nav v-else class="sidebar__list" aria-label="会话列表">
       <div v-if="convs.sorted.length === 0" class="sidebar__empty">还没有会话</div>
 
       <div

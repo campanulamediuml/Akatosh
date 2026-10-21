@@ -26,6 +26,7 @@ import type {
   ProviderTestResponse,
   SendMessageInput,
   SendMessageResponse,
+  SearchResult,
   SettingsResponse,
   State,
   UpdateConversationInput,
@@ -375,6 +376,10 @@ export async function uploadFiles(
 
 export const api = {
   health: (options?: RequestOptions) => http.get<Health>('/api/health', options),
+
+  /** 消息全文搜索（当前用户隔离） */
+  searchMessages: (q: string, options?: RequestOptions) =>
+    http.get<SearchResult[]>(`/api/search/messages?q=${encodeURIComponent(q)}`, options),
 
   /* 当前用户 / 用户管理（管理员） */
   getMe: (options?: RequestOptions) => http.get<Me>('/api/me', options),

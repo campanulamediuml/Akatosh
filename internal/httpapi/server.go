@@ -117,6 +117,9 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/providers/{id}/test", s.handleTestProvider)
 	m.HandleFunc("GET /api/models", s.handleListModels)
 
+	// 会话内全文搜索（当前用户隔离）
+	m.HandleFunc("GET /api/search/messages", s.handleSearchMessages)
+
 	// 会话
 	m.HandleFunc("GET /api/conversations", s.handleListConversations)
 	m.HandleFunc("POST /api/conversations", s.handleCreateConversation)

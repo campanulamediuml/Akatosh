@@ -80,6 +80,17 @@ export interface SettingsDefaults {
  * GET /api/settings 与 PUT /api/settings/defaults 的响应（同形状）。
  * 注意 v2 里**没有**单个 `provider` 字段了：供应商是一张列表。
  */
+/** 消息搜索结果（GET /api/search/messages） */
+export interface SearchResult {
+  conv_id: number
+  title: string
+  message_id: number
+  role: string
+  snippet: string
+  created_at: number
+  match_count: number
+}
+
 /* ------------------------------------------------------------------ */
 /* 用户（多租户）                                                        */
 /* ------------------------------------------------------------------ */

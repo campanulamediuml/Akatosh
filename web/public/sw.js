@@ -1,4 +1,4 @@
-/* Akatosh Service Worker — 手写，无依赖。
+/* AI 助手 Service Worker — 手写，无依赖。
    策略：
    - /api/*           ：一律放行（network-only），SSE 长连接绝不进缓存
    - /assets/*        ：hash 命名、immutable，cache-first
