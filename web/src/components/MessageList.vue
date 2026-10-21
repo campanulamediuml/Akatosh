@@ -67,6 +67,15 @@ watch(
   },
 )
 
+// 用户主动发送成功 → 强制回底并恢复贴底跟随（不管之前是不是在翻历史/搜索跳转）
+watch(
+  () => chat.scrollRequest,
+  () => {
+    atBottom.value = true
+    void nextTick(() => scrollToBottom(true))
+  },
+)
+
 // 切换会话：直接跳到底部
 watch(
   () => chat.conv?.id,

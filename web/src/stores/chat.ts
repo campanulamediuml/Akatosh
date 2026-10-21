@@ -175,6 +175,13 @@ interface ChatState {
   loading: boolean
   /** 内容版本号：每次变化自增，消息区据此做「贴底才跟随」的自动滚动 */
   revision: number
+  /**
+   * 「请滚到底部」请求序号：发送成功时 +1。
+   * 和 revision 的区别：revision 只在贴底时跟随（读历史时不能抢滚动条），
+   * 而这个是用户主动发送后的强制回底 —— 从搜索跳转过来/翻完历史再发消息，
+   * 都应该立刻看到刚发的那条。
+   */
+  scrollRequest: number
   /** 是否还有更早的消息可向上翻（state 首屏只带最近若干条） */
   hasMore: boolean
   /** 正在向上翻页加载更早消息 */
@@ -200,6 +207,7 @@ export const useChatStore = defineStore('chat', {
     lastSeq: 0,
     loading: false,
     revision: 0,
+    scrollRequest: 0,
     hasMore: false,
     loadingOlder: false,
     searchStatus: {},
@@ -467,6 +475,11 @@ export const useChatStore = defineStore('chat', {
      * 先开会话，再按分页一直往上翻到目标消息出现，最后滚动过去并短暂高亮。
      * 已归档的冻结消息同样能跳（它们只是只读，不是不存在）。
      */
+    /** 发送成功后调用：让消息区滚到底部并恢复贴底跟随 */
+    requestScrollToBottom(): void {
+      this.scrollRequest += 1
+    },
+
     async openMessage(convId: number, messageId: number): Promise<boolean> {
       await this.openConversation(convId)
       // 目标可能远早于首屏：最多翻 100 页，防死循环

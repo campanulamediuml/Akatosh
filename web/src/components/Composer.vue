@@ -598,6 +598,9 @@ async function submit(): Promise<void> {
       // 契约：POST 只返回 ack，内容等 SSE 的 message 事件推下来，这里不做任何插入。
       // 告诉 stream 管家「刚发了一条」：3s 没推到就立即重同步（长连接可能刚静默死掉）
       noteMessageSent()
+      // 主动发送后必须回到底部：从搜索跳转/翻历史过来时消息区不在贴底状态，
+      // 不发这个请求的话新消息发出去了却停在原地（用户会以为没发出去）
+      chat.requestScrollToBottom()
       text.value = ''
       clearDraft()
       clearImages()
