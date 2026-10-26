@@ -18,3 +18,5 @@
 /tools/.last-conv-id
 /web/src/components/Composer.vue
 .docker-assets
+/.docker-assets
+web/src/components/Composer.vue
