@@ -50,7 +50,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadTotal)
 	if err := r.ParseMultipartForm(8 << 20); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request", "解析上传内容失败（可能是文件过大）: "+err.Error())
+		writeErr(w, http.StatusBadRequest, "bad_request", uploadTooLargeErr(err, media.MaxUploadBytes>>20))
 		return
 	}
 	defer func() {
@@ -190,4 +190,14 @@ func (s *Server) serveAttachment(w http.ResponseWriter, r *http.Request, thumb b
 	}
 	// ServeContent 负责 Range / If-Modified-Since；modtime 用 0 表示"不知道"
 	http.ServeContent(w, r, att.Name, zeroTime, f)
+}
+
+// uploadTooLargeErr 把 multipart 解析错误翻译成用户能看懂的话：
+// 触到 MaxBytesReader 的上限 = 文件太大（给出明确上限）；其它解析错误原样附带。
+func uploadTooLargeErr(err error, limitMB int) string {
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		return fmt.Sprintf("文件超过了 %d MB 的上限", limitMB)
+	}
+	return "解析上传内容失败: " + err.Error()
 }

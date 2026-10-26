@@ -226,8 +226,8 @@ func (s *Session) run() {
 }
 
 // FillMessagesAttachments 给一批消息填附件（含 thumb_url/raw_url）和关联文件。
-// state 的两条路径（活跃会话走 mailbox、空闲会话直接读库）都必须过这一道：
-// 缺了它，带图消息在会话空闲回收后刷新就丢图（附件在库里，但接口没填出来）。
+// state、分页、实时事件与命令回执共用：关联存在另外的表里，
+// 少了这一步，前端会把缺字段的更新当成完整消息，表现为刷新前附件消失。
 func FillMessagesAttachments(st Store, msgs []store.Message) {
 	ids := make([]int64, 0, len(msgs))
 	for _, m := range msgs {
@@ -249,6 +249,16 @@ func FillMessagesAttachments(st Store, msgs []store.Message) {
 			}
 		}
 	}
+}
+
+// messageWithAttachments 返回出网用的完整消息，不修改调用方持有的对象。
+func messageWithAttachments(st Store, m *store.Message) *store.Message {
+	if m == nil {
+		return nil
+	}
+	one := []store.Message{*m}
+	FillMessagesAttachments(st, one)
+	return &one[0]
 }
 
 // ---------- 命令分发 ----------
@@ -1588,18 +1598,13 @@ func fillAttachmentURLs(msgs []store.Message) {
 	}
 }
 
-// publishMessage 发布消息变更。m 为 nil 时只带 message_id（删除/截断），
-// 前端收到这类事件应重新拉 state。
+// publishMessage 发布完整消息（含文件与图片）。m 为 nil 时只带 message_id
+// （删除/截断），前端收到这类事件应重新拉 state。
 func (s *Session) publishMessage(action string, m *store.Message, explicitID ...int64) {
 	convID := s.convID
 	var msgID int64
 	if m != nil {
-		// 出网关前补上附件 URL，否则前端拿到的附件没有 thumb_url/raw_url
-		if len(m.Attachments) > 0 {
-			one := []store.Message{*m}
-			fillAttachmentURLs(one)
-			m = &one[0]
-		}
+		m = messageWithAttachments(s.mgr.st, m)
 		msgID = m.ID
 	} else if len(explicitID) > 0 {
 		msgID = explicitID[0]

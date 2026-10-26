@@ -18,7 +18,7 @@ import (
 // 文本提取由 pybox 沙箱按需进行（read_file 工具调它），Go 不碰格式解析。
 
 // maxUploadFileBytes 是单文件上限（PDF/DOCX 文档类）。
-const maxUploadFileBytes = 20 << 20
+const maxUploadFileBytes = 100 << 20
 
 // 支持的扩展名（read_file 的提取脚本按这些分发；不支持的明确拒绝，
 // 避免用户传个视频然后纳闷为什么 AI 说读不了）。
@@ -54,7 +54,7 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadFileBytes*2)
 	if err := r.ParseMultipartForm(8 << 20); err != nil {
-		writeErr(w, http.StatusBadRequest, "bad_request", "解析上传内容失败（可能是文件过大）: "+err.Error())
+		writeErr(w, http.StatusBadRequest, "bad_request", uploadTooLargeErr(err, maxUploadFileBytes>>20))
 		return
 	}
 	defer func() {

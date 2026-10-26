@@ -94,13 +94,32 @@ func (c *Client) ListModels(ctx context.Context) ([]RemoteModel, error) {
 // capabilitiesOf 判断模型是否支持思考强度，以及支持哪些档位。
 func capabilitiesOf(id string, reasoningRaw json.RawMessage, supportedParams []string, caps map[string]any) (bool, []string) {
 	// 1) OpenRouter 风格：reasoning: {"supported_efforts": ["low","medium","high"]}
+	//    以及 Kimi coding 风格（2026 新增）：reasoning: {"type": "only",
+	//    "effort": {"valid": ["low","high","max"], "default": "high"}}
+	//    —— 两轴分开：type 声明「能否思考」，effort.valid 声明「有无思考档位」。
 	if len(reasoningRaw) > 0 {
 		var obj struct {
 			SupportedEfforts []string `json:"supported_efforts"`
 			Mandatory        bool     `json:"mandatory"`
+			// Kimi coding 的形状
+			Type   string `json:"type"` // "only" = 始终思考；"optional" = 可开关
+			Effort *struct {
+				Valid   []string `json:"valid"`
+				Default string   `json:"default"`
+			} `json:"effort"`
 		}
-		if err := json.Unmarshal(reasoningRaw, &obj); err == nil && len(obj.SupportedEfforts) > 0 {
-			return true, normalizeEfforts(obj.SupportedEfforts)
+		if err := json.Unmarshal(reasoningRaw, &obj); err == nil {
+			// 档位优先：effort.valid（Kimi）→ supported_efforts（OpenRouter）
+			if obj.Effort != nil && len(obj.Effort.Valid) > 0 {
+				return true, normalizeEfforts(obj.Effort.Valid)
+			}
+			if len(obj.SupportedEfforts) > 0 {
+				return true, normalizeEfforts(obj.SupportedEfforts)
+			}
+			// 能思考但没档位：type 声明了思考能力（always/optional），effort 没有清单
+			if obj.Type != "" {
+				return true, []string{}
+			}
 		}
 		var b bool
 		if err := json.Unmarshal(reasoningRaw, &b); err == nil && b {
@@ -217,7 +236,7 @@ func normalizeEfforts(in []string) []string {
 	for _, e := range in {
 		e = strings.ToLower(strings.TrimSpace(e))
 		switch e {
-		case "minimal", "low", "medium", "high":
+		case "minimal", "low", "medium", "high", "max":
 			if !seen[e] {
 				seen[e] = true
 				out = append(out, e)
@@ -227,7 +246,7 @@ func normalizeEfforts(in []string) []string {
 	if len(out) == 0 {
 		return []string{}
 	}
-	order := map[string]int{"minimal": 0, "low": 1, "medium": 2, "high": 3}
+	order := map[string]int{"minimal": 0, "low": 1, "medium": 2, "high": 3, "max": 4}
 	sort.Slice(out, func(i, j int) bool { return order[out[i]] < order[out[j]] })
 	return out
 }
@@ -249,7 +268,7 @@ func InferReasoning(modelID string) bool {
 		// DeepSeek 当前在架、且实测默认就会吐 reasoning_content 的型号
 		"deepseek-flash", "deepseek-v4",
 		// kimi-k3：始终推理（无 thinking 开关），但有 reasoning_effort 档位（low/high/max）
-		"kimi-k3",
+		"kimi-k3", "kimi-for-coding",
 		"qwen3", "kimi-k2-thinking", "ernie-x1", "step-3", "hunyuan-t1",
 	} {
 		if strings.Contains(s, p) {
@@ -261,7 +280,7 @@ func InferReasoning(modelID string) bool {
 		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9')
 	}) {
 		switch t {
-		case "o1", "o3", "o4", "r1":
+		case "o1", "o3", "o4", "r1", "k3":
 			return true
 		}
 	}

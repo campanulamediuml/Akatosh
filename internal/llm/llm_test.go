@@ -1,6 +1,9 @@
 package llm
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestNormalizeBaseURL(t *testing.T) {
 	cases := []struct{ in, want string }{
@@ -70,6 +73,29 @@ func TestInferReasoning(t *testing.T) {
 // 文本型号（v2.5/v2.6 全系）reasoning=true 且带通用三档（官方没写档位，
 // 按「猜支持的代价很轻」原则放开，上游不认会自动去掉重试）；
 // asr/tts 音频型号不标思考。
+// Kimi coding 声明形状（type + effort.valid）：两轴分开判定。
+// type=only 且 effort.valid 有清单 → 思考 + 档位；type=only 无 effort → 思考无档位。
+func TestKimiCodingCapabilities(t *testing.T) {
+	kimi := json.RawMessage(`{"type":"only","effort":{"valid":["low","high","max"],"default":"high"}}`)
+	r, e := capabilitiesOf("k3", kimi, nil, nil)
+	if !r || len(e) != 3 || e[2] != "max" {
+		t.Fatalf("k3 应为 reasoning=true 且三档(low/high/max)，实际 %v %v", r, e)
+	}
+	r, e = capabilitiesOf("kimi-for-coding-highspeed", json.RawMessage(`{"type":"only"}`), nil, nil)
+	if !r || len(e) != 0 {
+		t.Fatalf("highspeed 应为「思考开启但无档位」，实际 %v %v", r, e)
+	}
+	r, _ = capabilitiesOf("kimi-for-coding", json.RawMessage(`{"type":"only","effort":{"valid":["low","high","max"],"default":"max"}}`), nil, nil)
+	if !r {
+		t.Fatal("kimi-for-coding 应识别为思考模型")
+	}
+	// 名字兜底：上游不声明时，裸名 k3 也要识别出来
+	r, _ = capabilitiesOf("k3", nil, nil, nil)
+	if !r {
+		t.Fatal("裸名 k3 的名字推断应识别为思考模型")
+	}
+}
+
 func TestMimoCapabilities(t *testing.T) {
 	for _, id := range []string{"mimo-v2.5", "mimo-v2.5-pro", "mimo-v2.6-flash", "mimo-v2.6-pro"} {
 		r, e := capabilitiesOf(id, nil, nil, nil)

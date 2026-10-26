@@ -318,12 +318,18 @@ func (m *Manager) call(ctx context.Context, convID int64, cmd command) (result, 
 		// 回执和 s.done 会同时就绪，优先取回执。
 		select {
 		case r := <-cmd.reply:
+			if r.err == nil {
+				r.res.message = messageWithAttachments(m.st, r.res.message)
+			}
 			return r.res, r.err
 		default:
 		}
 
 		select {
 		case r := <-cmd.reply:
+			if r.err == nil {
+				r.res.message = messageWithAttachments(m.st, r.res.message)
+			}
 			return r.res, r.err
 		case <-s.done:
 			continue

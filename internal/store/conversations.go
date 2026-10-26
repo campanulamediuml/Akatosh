@@ -358,6 +358,8 @@ func (s *Store) ForkConversation(convID, beforeMsgID, newUserID int64) (*Convers
 
 	// 旧消息 id → 新消息 id，用来复制附件/文件关联
 	idMap := map[int64]int64{}
+	// 按原消息顺序收集的新 id（compacted_before 重映射要用，map 遍历无序）
+	orderedNewIDs := []int64{}
 	for _, m := range msgs {
 		if m.ID > anchor {
 			continue
@@ -380,7 +382,30 @@ func (s *Store) ForkConversation(convID, beforeMsgID, newUserID int64) (*Convers
 		}
 		nid, _ := r.LastInsertId()
 		idMap[m.ID] = nid
+		orderedNewIDs = append(orderedNewIDs, nid)
 	}
+	// compacted_before 必须重映射：消息复制后拿了新 id，原样拷贝会让
+	// 冻结边界指到不存在的旧 id（fork 里全部消息变相解冻，归档纪律失效）。
+	// 冻结的是原消息的「前缀」（id <= compacted_before），按位置数出来对应的新 id。
+	newCompactedBefore := int64(0)
+	if src.CompactedBefore > 0 {
+		// 冻结的是原消息的前缀（id <= compacted_before），数出前几条对应的新 id
+		frozenTotal := 0
+		for _, m := range msgs {
+			if m.ID <= anchor && m.ID <= src.CompactedBefore {
+				frozenTotal++
+			}
+		}
+		if frozenTotal > 0 && frozenTotal <= len(orderedNewIDs) {
+			newCompactedBefore = orderedNewIDs[frozenTotal-1]
+		}
+	}
+	if newCompactedBefore > 0 {
+		if _, err := s.db.Exec(`UPDATE conversations SET compacted_before = ? WHERE id = ?`, newCompactedBefore, newID); err != nil {
+			return nil, err
+		}
+	}
+
 	// 附件关联：图片本体不复制（哈希去重共享），只复制关联行
 	for oldID, newMsgID := range idMap {
 		atts, err := s.ListAttachments(oldID)

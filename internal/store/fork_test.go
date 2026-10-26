@@ -62,8 +62,21 @@ func TestForkConversationFromMessage(t *testing.T) {
 	if fork.Title != wantTitle {
 		t.Errorf("标题应为 %q，实际 %q", wantTitle, fork.Title)
 	}
-	if fork.CompactedBefore != msgIDs[1] || fork.Summary != "前两条的摘要" {
-		t.Errorf("压缩状态没带走: compacted_before=%d summary=%q", fork.CompactedBefore, fork.Summary)
+	if fork.Summary != "前两条的摘要" {
+		t.Errorf("摘要没带走: %q", fork.Summary)
+	}
+	// compacted_before 必须重映射到新 id：冻结的是原前 2 条 → 第 2 条复制后的新 id
+	fmsgsEarly, _ := st.ListMessages(fork.ID)
+	if len(fmsgsEarly) != 3 {
+		t.Fatalf("fork 消息数不对: %d", len(fmsgsEarly))
+	}
+	if fork.CompactedBefore != fmsgsEarly[1].ID {
+		t.Errorf("compacted_before 应重映射为第 2 条的新 id %d，实际 %d", fmsgsEarly[1].ID, fork.CompactedBefore)
+	}
+	var frozenN int
+	_ = st.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE conv_id = ? AND id <= ?`, fork.ID, fork.CompactedBefore).Scan(&frozenN)
+	if frozenN != 2 {
+		t.Errorf("fork 里应有 2 条冻结消息，实际 %d", frozenN)
 	}
 	if fork.UserID != 1 {
 		t.Errorf("fork 会话属主不对: %d", fork.UserID)

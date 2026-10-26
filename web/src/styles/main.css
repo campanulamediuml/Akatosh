@@ -2522,6 +2522,20 @@ a:hover {
   font-size: var(--fs-xs);
 }
 
+/* 上传失败：和图片的失败态同款红框 + 红色图标；重试按钮不继承移除按钮的 hover 变红 */
+.filechip--error {
+  border-color: var(--danger-border);
+  color: var(--danger);
+}
+
+.filechip--error svg {
+  color: var(--danger);
+}
+
+.filechip .spinner {
+  flex: 0 0 auto;
+}
+
 .filechip__remove {
   flex: 0 0 auto;
   display: inline-flex;
