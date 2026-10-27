@@ -46,6 +46,13 @@ const settings = useSettingsStore()
 /** 超过它就让 textarea 自己滚动 */
 const MAX_HEIGHT = 200
 
+/** 与后端 media.MaxUploadBytes 一致 */
+const MAX_UPLOAD_MB = 20
+const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
+/** 与后端 maxUploadFileBytes 一致 */
+const MAX_FILE_UPLOAD_MB = 100
+const MAX_FILE_UPLOAD_BYTES = MAX_FILE_UPLOAD_MB * 1024 * 1024
+
 const text = ref('')
 const area = ref<HTMLTextAreaElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -142,11 +149,22 @@ const canSubmit = computed(
 /* ---------------- 待发送的文档 ---------------- */
 
 interface PendingFile {
+  /** 本地唯一 key：同一份文件重复添加也是两条独立记录（与图片一致） */
+  key: string
+  /** 后端文件 id；上传中为 0 */
   id: number
   name: string
   size: number
+  /** 原始 File 引用：失败重试用 */
+  file: File
+  status: 'uploading' | 'ready' | 'error'
+  /** 上传失败的原因（title 悬停可见） */
+  error: string
+  /** 在飞的上传，submit 要等它 */
+  promise: Promise<void> | null
 }
 
+let fileSeq = 0
 const pendingFiles = ref<PendingFile[]>([])
 const docInput = ref<HTMLInputElement | null>(null)
 
@@ -172,21 +190,64 @@ function pickDocs(): void {
   docInput.value?.click()
 }
 
-async function onDocPicked(e: Event): Promise<void> {
+/**
+ * 逐份上传（每份一个请求、各自有状态和重试入口——和图片的待遇一致）。
+ * 注意必须 push 后再从数组里取回响应式代理去上传（同 addFiles 的坑），
+ * 直接改原始对象会绕过 Vue Proxy，界面永远停在「上传中」。
+ */
+function onDocPicked(e: Event): void {
   const input = e.target as HTMLInputElement
-  const files = Array.from(input.files ?? [])
+  let files = Array.from(input.files ?? [])
   input.value = ''
-  if (!files.length) return
-  try {
-    const ups = await uploadFiles(files)
-    pendingFiles.value.push(...ups.map((u) => ({ id: u.id, name: u.name, size: u.size })))
-  } catch (err) {
-    toast.error(`文件上传失败：${toError(err).message}`)
+  const oversized = files.filter((f) => f.size > MAX_FILE_UPLOAD_BYTES)
+  if (oversized.length > 0) {
+    toast.info(`已忽略超过 ${MAX_FILE_UPLOAD_MB} MB 的文件：${oversized.map((f) => f.name).join('、')}`)
+    files = files.filter((f) => f.size <= MAX_FILE_UPLOAD_BYTES)
+  }
+  for (const file of files) {
+    pendingFiles.value.push({
+      key: `f${++fileSeq}`,
+      id: 0,
+      name: file.name,
+      size: file.size,
+      file,
+      status: 'uploading',
+      error: '',
+      promise: null,
+    })
+    void uploadPending(pendingFiles.value[pendingFiles.value.length - 1])
   }
 }
 
-function removePendingFile(id: number): void {
-  pendingFiles.value = pendingFiles.value.filter((f) => f.id !== id)
+async function uploadPending(item: PendingFile): Promise<void> {
+  item.status = 'uploading'
+  item.error = ''
+  const run = (async () => {
+    try {
+      const ups = await uploadFiles([item.file])
+      const rec = ups[0]
+      if (!rec || typeof rec.id !== 'number') throw new Error('服务端没有返回文件记录')
+      item.id = rec.id
+      item.status = 'ready'
+    } catch (err) {
+      item.id = 0
+      item.status = 'error'
+      item.error = toError(err).message
+    } finally {
+      item.promise = null
+    }
+  })()
+  item.promise = run
+  await run
+}
+
+function retryPendingFile(item: PendingFile): void {
+  if (item.status === 'uploading') return
+  void uploadPending(item)
+}
+
+function removePendingFile(key: string): void {
+  pendingFiles.value = pendingFiles.value.filter((f) => f.key !== key)
 }
 
 function clearPendingFiles(): void {
@@ -302,8 +363,12 @@ function addFiles(files: File[]): void {
     return
   }
   if (images.length < files.length) toast.info('已忽略非图片文件')
+  const bigImages = images.filter((f) => f.size > MAX_UPLOAD_BYTES)
+  if (bigImages.length > 0) {
+    toast.info(`已忽略超过 ${MAX_UPLOAD_MB} MB 的图片：${bigImages.map((f) => f.name).join('、')}`)
+  }
 
-  const items: PendingImage[] = images.map((file) => ({
+  const items: PendingImage[] = images.filter((f) => f.size <= MAX_UPLOAD_BYTES).map((file) => ({
     key: `p${++pendingSeq}`,
     file,
     prepared: null,
@@ -590,6 +655,22 @@ async function submit(): Promise<void> {
     for (const p of pending.value) {
       if (p.attachment) attachmentIds.push(p.attachment.id)
     }
+
+    // 3.5 文档同样要先等上传：有在飞的先等，任何一份没传成功就整体不发
+    const inflightFiles = pendingFiles.value
+      .map((f) => f.promise)
+      .filter((p): p is Promise<void> => p !== null)
+    if (inflightFiles.length > 0) await Promise.all(inflightFiles)
+    const failedFiles = pendingFiles.value.filter((f) => f.status !== 'ready' || f.id <= 0)
+    if (failedFiles.length > 0) {
+      const first = failedFiles[0]
+      toast.error(
+        failedFiles.length === 1
+          ? `有 1 个文件没上传成功，先重试或移除它：${first.error || '未知原因'}`
+          : `有 ${failedFiles.length} 个文件没上传成功，先重试或移除它们`,
+      )
+      return
+    }
     // 文档 id（/api/files 上传时拿到的）
     const fileIds = pendingFiles.value.map((f) => f.id)
 
@@ -671,15 +752,42 @@ async function submit(): Promise<void> {
           </div>
         </div>
 
-        <!-- 待发送的文档：小卡片，× 移除；和图片分开入口（手机上唤起文件管理器而不是相册） -->
+        <!-- 待发送的文档：小卡片。和图片一致的待遇：上传中有菊花、失败显示原因可重试 -->
         <div v-if="pendingFiles.length > 0" class="composer__atts">
-          <div v-for="f in pendingFiles" :key="f.id" class="filechip" :title="`文件 #${f.id} · ${f.name}`">
-            <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">
+          <div
+            v-for="f in pendingFiles"
+            :key="f.key"
+            class="filechip"
+            :class="{ 'filechip--error': f.status === 'error' }"
+            :title="
+              f.status === 'uploading'
+                ? `${f.name} · 上传中…`
+                : f.status === 'error'
+                  ? `${f.name} 上传失败：${f.error}（点击叹号重试）`
+                  : `文件 #${f.id} · ${f.name}`
+            "
+          >
+            <span v-if="f.status === 'uploading'" class="spinner" />
+            <svg v-else-if="f.status === 'error'" width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">
+              <use href="#i-alert" />
+            </svg>
+            <svg v-else width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">
               <use href="#i-doc" />
             </svg>
             <span class="filechip__name">{{ f.name }}</span>
-            <span class="filechip__size">{{ formatBytes(f.size) }}</span>
-            <button type="button" class="filechip__remove" title="移除这个文件" @click="removePendingFile(f.id)">
+            <span class="filechip__size">{{ f.status === 'uploading' ? '上传中…' : formatBytes(f.size) }}</span>
+            <button
+              v-if="f.status === 'error'"
+              type="button"
+              class="filechip__remove"
+              title="上传失败，点击重试"
+              @click="retryPendingFile(f)"
+            >
+              <svg width="9" height="9" viewBox="0 0 16 16" aria-hidden="true">
+                <use href="#i-refresh" />
+              </svg>
+            </button>
+            <button type="button" class="filechip__remove" title="移除这个文件" @click="removePendingFile(f.key)">
               <svg width="9" height="9" viewBox="0 0 16 16" aria-hidden="true">
                 <use href="#i-close" />
               </svg>
