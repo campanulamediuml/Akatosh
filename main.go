@@ -31,6 +31,7 @@ import (
 // 前端构建产物直接嵌进二进制，部署就是一个 exe。
 //
 //go:embed all:web/dist
+
 var webDist embed.FS
 
 const version = "1.0.0"
