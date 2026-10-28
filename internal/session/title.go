@@ -86,7 +86,7 @@ func (t *Titler) Generate(convID int64, expectedTitle string, cli *llm.Client, m
 		prompt = strings.Replace(prompt,
 			"%s", truncateRunes(strings.TrimSpace(reply), titleSnippet), 1)
 
-		raw, usage, err := cli.Complete(ctx, model, []llm.ChatMessage{{Role: "user", Content: prompt}}, 512)
+		raw, usage, err := cli.Complete(ctx, model, []llm.ChatMessage{{Role: "user", Content: prompt}}, 512, "none")
 		elapsed := time.Since(start)
 		if err != nil {
 			// 失败就保留本地截断的标题，不打扰用户

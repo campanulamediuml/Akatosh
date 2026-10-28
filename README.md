@@ -122,10 +122,9 @@ go build -o ai-assistant.exe .
 | `-data` | `data` | 数据目录，SQLite 文件放在这里 |
 | `-misc` | `misc` | **附件目录**，上传的图片和文档放这里。和 `-data` 分开，方便各挂各的卷 |
 | `-token` | 空 | 访问令牌。留空不鉴权；填 `auto` 自动生成并打印可用的手机访问地址 |
-| `-allow-host` | 空 | 额外允许的主机名，逗号分隔（用机器名 / MagicDNS 名访问时才需要；用 IP 不需要） |
 | `-searxng` | 空 | SearXNG 地址（如 `http://127.0.0.1:18084`）。配置后开启联网搜索：会话上会出现「联网」开关，模型通过 function calling 自主调用 `web_search`。留空则完全没有这个功能 |
 | `-pybox` | 空 | Python 沙箱地址（如 `http://pybox:8000`）。配置后开启 `run_python` 和 `read_file`（全局可用，无开关，模型自主判断用不用）。沙箱镜像是 `Dockerfile.pybox`；断网、只读和资源限额须由部署方式另行保证 |
-| `-imagegen` | 空 | 图像生成：格式 `base_url\|api_key\|model`（model 可省，默认 `Tongyi-MAI/Z-Image-Turbo`），如 `https://api.siliconflow.cn\|sk-xxx\|Kwai-Kolors/Kolors`。配置后模型可自主调用 `generate_image`。注意 key 写在命令行里会留在 shell 历史中 |
+| `-imagegen` | `IMAGEGEN` 环境变量 | 图像生成：格式 `base_url\|api_key\|model`（model 可省，默认 `Tongyi-MAI/Z-Image-Turbo`），如 `https://api.siliconflow.cn\|sk-xxx\|Kwai-Kolors/Kolors`。配置后模型可自主调用 `generate_image`。优先使用环境变量，避免 key 留在 shell 历史中 |
 | `-compact-threshold` | `0.7` | 上下文提示阈值（0~1）：进度超过这个比例时变红并建议手动压缩。压缩本身是**手动触发**（会话窗口右上角按钮），这个参数只控制提示；`0` = 不提示 |
 | `-open` | `false` | 启动后自动打开浏览器 |
 
@@ -304,7 +303,7 @@ misc/files/               上传的文档：按内容 sha256 命名，read_file 
 
 备份就是把 `data/` 和 `misc/` 两个目录都复制走。注意 **API Key 是明文存在 SQLite 里的**——
 这是本地单用户工具的取舍。
-服务默认只绑 `127.0.0.1`，并以 **Host 校验为主、Origin 校验为辅** 防 DNS rebinding，
+服务默认只绑 `127.0.0.1`，不限制访问 Host，并校验 Origin 拒绝跨源请求；
 但仍然不要把这份数据库提交到任何仓库。
 
 ---

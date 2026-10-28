@@ -230,22 +230,24 @@ export const useChatStore = defineStore('chat', {
     },
 
     /**
-     * 会话上下文占用：{ used, total }。
+     * 会话上下文占用：{ used, total, estimated }。
      * - total 来自会话当前模型的 context_len（没声明则为 0，界面不显示）；
-     * - used 取最近一条完成的助手消息的 prompt_tokens（上游实测，含 reasoning 回传）——
-     *   每轮都会带上全部历史，它就是「当前历史有多大」的准确值。
-     *   编辑正文/CoT 后下一次发送时，那轮 prompt 自然就是修改后的历史，随之更新。
+     * - 压缩后先用后端保存的估算值，让页面立即反映上下文缩小；
+     * - 下一轮拿到上游 prompt_tokens 后估算值清零，恢复显示实测值。
      */
-    contextUsage(): { used: number; total: number } | null {
+    contextUsage(): { used: number; total: number; estimated: boolean } | null {
       const conv = this.conv
       if (!conv) return null
       const m = useSettingsStore().modelIn(conv.provider_id, conv.model_id)
       const total = m?.context_len ?? 0
       if (total <= 0) return null
+      if (conv.context_estimate > 0) {
+        return { used: conv.context_estimate, total, estimated: true }
+      }
       const last = [...this.messages]
         .reverse()
         .find((x) => x.role === 'assistant' && x.status !== 'streaming' && (x.usage?.prompt_tokens ?? 0) > 0)
-      return { used: last?.usage.prompt_tokens ?? 0, total }
+      return { used: last?.usage.prompt_tokens ?? 0, total, estimated: false }
     },
   },
 

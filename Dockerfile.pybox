@@ -1,5 +1,5 @@
-# Python 代码执行沙箱。隔离全部由容器承担（见 docker-compose.yml 里 pybox 的
-# internal 网络 / read-only / tmpfs / 限额配置），镜像里只需要 Python 本体。
+# Python 代码执行沙箱。隔离全部由容器承担（部署 Compose 里配置 pybox 的
+# internal 网络 / read-only / tmpfs / 限额），镜像里只需要 Python 本体。
 FROM docker.m.daocloud.io/library/python:3.13-slim
 
 # 常用库预装：沙箱断网，模型写的代码 import 不了装不了的包。

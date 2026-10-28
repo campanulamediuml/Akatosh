@@ -59,7 +59,7 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-const schemaVersion = 12
+const schemaVersion = 13
 
 func (s *Store) migrate() error {
 	var ver int
@@ -198,8 +198,22 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	// v13：压缩后的上下文用量估算（下一次上游 usage 返回后清零）
+	if err := s.migrateToV13(); err != nil {
+		return err
+	}
+
 	if _, err := s.db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
 		return fmt.Errorf("写入 schema 版本失败: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) migrateToV13() error {
+	if _, err := s.db.Exec(`ALTER TABLE conversations ADD COLUMN context_estimate INTEGER NOT NULL DEFAULT 0`); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return fmt.Errorf("迁移到 v13 失败: %w", err)
+		}
 	}
 	return nil
 }

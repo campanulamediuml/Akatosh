@@ -1312,6 +1312,11 @@ func currentDatePrompt() string {
 // 发给模型的是**原图**（发送版 1024 会丢细节，上游自己会做尺寸归一化）；
 // 原图超 ~10MB 才退回发送版（上游对单图大小有限制）。
 func (s *Session) buildHistory(modelID string) []llm.ChatMessage {
+	// 压缩在独立 goroutine 里写库，不会直接改 actor 独占的 s.conv。
+	// 每轮组装前重读，确保下一轮立即使用最新摘要和 compacted_before。
+	if conv, err := s.mgr.st.GetConversation(s.convID); err == nil && conv != nil {
+		s.conv = conv
+	}
 	out := []llm.ChatMessage{}
 	// 三条 system，顺序固定：会话级 → 全局默认 → 时间。
 	// 会话级 system prompt 是这条会话的「宪法」：永远在最前面、不参与压缩。

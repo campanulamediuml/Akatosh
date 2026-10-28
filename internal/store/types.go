@@ -90,6 +90,8 @@ type Conversation struct {
 	// 消息 id（含）。更早的消息已被冻结（内容折进摘要，只读）。
 	Summary         string `json:"summary"`
 	CompactedBefore int64  `json:"compacted_before"`
+	// ContextEstimate 是压缩后对下一次请求 prompt tokens 的估算；0 = 使用上游实测值。
+	ContextEstimate int `json:"context_estimate"`
 	// Compacting 不是数据库列：该会话此刻是否正在压缩（压缩期间阻塞发送）。
 	Compacting   bool  `json:"compacting"`
 	Pinned       bool  `json:"pinned"`

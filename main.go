@@ -40,10 +40,9 @@ func main() {
 	dataDir := flag.String("data", "data", "数据目录，存放 sqlite 数据库")
 	miscDir := flag.String("misc", "misc", "附件目录，存放上传的图片（Docker 部署时可以单独挂载）")
 	tokenFlag := flag.String("token", "", "访问令牌：留空不鉴权，填 auto 自动生成并打印。手机访问时强烈建议设置")
-	allowHostFlag := flag.String("allow-host", "", "额外允许的主机名，逗号分隔（用机器名/MagicDNS 名访问时才需要；用 IP 不需要）")
 	searxngFlag := flag.String("searxng", "", "SearXNG 地址（如 http://searxng:8080）：配置后开启联网搜索（function calling）；留空禁用")
 	pyboxFlag := flag.String("pybox", "", "Python 沙箱地址（如 http://pybox:8000）：配置后开启 run_python 代码执行工具；留空禁用")
-	imagegenFlag := flag.String("imagegen", "", "图像生成：格式 base_url|api_key|model（model 可省，默认 Tongyi-MAI/Z-Image-Turbo）；如 https://api.siliconflow.cn|sk-xxx|Kwai-Kolors/Kolors")
+	imagegenFlag := flag.String("imagegen", strings.TrimSpace(os.Getenv("IMAGEGEN")), "图像生成：格式 base_url|api_key|model，默认读取 IMAGEGEN 环境变量（model 可省，默认 Tongyi-MAI/Z-Image-Turbo）")
 	compactFlag := flag.Float64("compact-threshold", 0.7, "上下文提示阈值（0~1）：进度条超过这个比例时变红并建议手动压缩（压缩本身是手动触发，见会话窗口右上角按钮；0 = 不提示）")
 	openBrowser := flag.Bool("open", false, "启动后自动打开浏览器")
 	flag.Parse()
@@ -135,7 +134,6 @@ func main() {
 
 	handler := httpapi.New(st, mgr, sub, version, *addr, mediaStore,
 		httpapi.WithFilesDir(filepath.Join(*miscDir, "files")),
-		httpapi.WithAllowHosts(splitList(*allowHostFlag)),
 	)
 	httpServer := &http.Server{
 		Addr:              *addr,
@@ -220,21 +218,6 @@ func main() {
 	// 先让各会话把正在生成的最后一小段内容落盘，再停 HTTP 服务
 	mgr.Shutdown(ctx)
 	_ = httpServer.Shutdown(ctx)
-}
-
-// splitList 把逗号分隔的参数拆成切片（去空、去空白）。
-func splitList(s string) []string {
-	if strings.TrimSpace(s) == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if v := strings.TrimSpace(p); v != "" {
-			out = append(out, v)
-		}
-	}
-	return out
 }
 
 // accessTarget 一个可直接访问的地址，note 只用来提示（比如网卡名）。

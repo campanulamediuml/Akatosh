@@ -85,6 +85,7 @@ func (s *Store) UpdateMessageStream(id int64, reasoning, content string) error {
 
 // FinishMessage 落最终状态。searchLog 是本轮工具调用的 JSON 摘要（展示用，无调用传空串）；
 // toolRounds 是本轮完整工具交互（跨轮全量回放用，无调用传空串）。
+// 拿到真实 prompt usage 后，压缩时保存的上下文估算值立即失效。
 func (s *Store) FinishMessage(id int64, status, reasoning, content, errMsg string, u Usage, searchLog, toolRounds string) error {
 	_, err := s.db.Exec(
 		`UPDATE messages SET status = ?, reasoning = ?, content = ?, error = ?,
@@ -96,6 +97,11 @@ func (s *Store) FinishMessage(id int64, status, reasoning, content, errMsg strin
 		u.PromptTokens, u.CompletionTokens, u.ReasoningTokens, u.TotalTokens,
 		u.CacheHitTokens, u.CacheMissTokens,
 		NowMs(), searchLog, toolRounds, id)
+	if err != nil || u.PromptTokens <= 0 {
+		return err
+	}
+	_, err = s.db.Exec(
+		`UPDATE conversations SET context_estimate = 0 WHERE id = (SELECT conv_id FROM messages WHERE id = ?)`, id)
 	return err
 }
 

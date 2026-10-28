@@ -112,6 +112,9 @@ func TestRunCompactMultiRound(t *testing.T) {
 	if conv1.CompactedBefore != msgs[13].ID {
 		t.Fatalf("第一轮边界应为 msgs[13].ID=%d，实际 %d", msgs[13].ID, conv1.CompactedBefore)
 	}
+	if conv1.ContextEstimate <= 0 {
+		t.Fatalf("压缩后应保存上下文估算值，实际 %d", conv1.ContextEstimate)
+	}
 
 	// 再聊 16 条（共 40 条），第二轮：fresh = (msgs[13], msgs[29]]
 	addMessages(t, st, conv.ID, 16, 10)
@@ -167,5 +170,86 @@ func TestRunCompactTruncationCoverage(t *testing.T) {
 	}
 	if conv1.Summary == "" {
 		t.Fatal("截断也应产出摘要（覆盖已包含的部分）")
+	}
+}
+
+func TestRunCompactUsesConversationEffort(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	efforts := make(chan string, 1)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			ReasoningEffort string `json:"reasoning_effort"`
+		}
+		_ = decodeBody(r, &body)
+		efforts <- body.ReasoningEffort
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"content": "摘要"}}},
+		})
+	}))
+	t.Cleanup(up.Close)
+
+	conv := seedConvWithUpstream(t, st, up.URL, 14, 10)
+	effort := "high"
+	if _, err := st.UpdateConversation(conv.ID, store.ConversationPatch{Effort: &effort}); err != nil {
+		t.Fatal(err)
+	}
+	mgr := compactManager(t, st, up.URL)
+	s, err := mgr.getOrCreate(conv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.runCompact()
+
+	select {
+	case got := <-efforts:
+		if got != effort {
+			t.Fatalf("压缩请求应沿用会话思考强度 %q，实际 %q", effort, got)
+		}
+	default:
+		t.Fatal("压缩请求没有发出")
+	}
+}
+
+func TestCompactContextEstimateLifecycle(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	up := compactUpstream(t, nil, nil)
+	conv := seedConvWithUpstream(t, st, up.URL, 24, 100)
+	msgs, _ := st.ListMessages(conv.ID)
+	last := msgs[len(msgs)-1]
+	if err := st.FinishMessage(last.ID, last.Status, last.Reasoning, last.Content, last.Error,
+		store.Usage{PromptTokens: 10000}, last.SearchLog, last.ToolRounds); err != nil {
+		t.Fatal(err)
+	}
+
+	mgr := compactManager(t, st, up.URL)
+	s, err := mgr.getOrCreate(conv.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.runCompact()
+
+	compacted, _ := st.GetConversation(conv.ID)
+	if compacted.ContextEstimate <= 0 || compacted.ContextEstimate >= 10000 {
+		t.Fatalf("压缩后估算值应大于 0 且小于锚点 10000，实际 %d", compacted.ContextEstimate)
+	}
+
+	if err := st.FinishMessage(last.ID, last.Status, last.Reasoning, last.Content, last.Error,
+		store.Usage{PromptTokens: 123}, last.SearchLog, last.ToolRounds); err != nil {
+		t.Fatal(err)
+	}
+	updated, _ := st.GetConversation(conv.ID)
+	if updated.ContextEstimate != 0 {
+		t.Fatalf("拿到下一次真实 usage 后估算值应清零，实际 %d", updated.ContextEstimate)
 	}
 }

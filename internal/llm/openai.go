@@ -327,7 +327,8 @@ func parseStream(ctx context.Context, body io.ReadCloser, out chan<- Event) {
 // 给太小会被思考吃光，正文仍然是空的。
 const ampleTokens = 2048
 
-// Complete 发一次**非流式**请求，返回正文与用量，给「起标题」这类小任务用。
+// Complete 发一次**非流式**请求，返回正文与用量，给起标题、上下文压缩这类任务用。
+// effort 为空调用方不下发 reasoning_effort；起标题传 none，压缩传会话的思考强度。
 //
 // 这里兜住了两个实测出来的坑：
 //
@@ -336,11 +337,9 @@ const ampleTokens = 2048
 //     512 个 completion token 全是 reasoning，content 是空串。
 //  2. 不是所有上游都认 reasoning_effort 这个参数。
 //
-// 策略：先用 reasoning_effort=none 打一枪（能关掉思考就最省最快，实测
-// 810ms / 9 个 token 就能拿到干净标题）；上游不认这个参数就摘掉重试；
-// 万一正文还是空的，再放大额度补一枪。
-func (c *Client) Complete(ctx context.Context, model string, msgs []ChatMessage, maxTokens int) (string, Usage, error) {
-	out, usage, err := c.completeOnce(ctx, model, msgs, maxTokens, "none")
+// 上游不认这个参数就摘掉重试；万一正文还是空的，再放大额度补一枪。
+func (c *Client) Complete(ctx context.Context, model string, msgs []ChatMessage, maxTokens int, effort string) (string, Usage, error) {
+	out, usage, err := c.completeOnce(ctx, model, msgs, maxTokens, effort)
 	if err != nil {
 		var ae *APIError
 		unsupported := errors.As(err, &ae) &&

@@ -540,11 +540,11 @@ function toggleWebSearch(): void {
 
 const ctxUsage = computed(() => chat.contextUsage)
 
-/** 紧凑文本：「8.3k/1.0M」；宽屏时前面的「上下文」标签由 CSS 控制显隐 */
+/** 紧凑文本：「8.3k/1.0M」；估算值加 ~，宽屏时前面的「上下文」标签由 CSS 控制显隐 */
 const ctxText = computed(() => {
   const u = ctxUsage.value
   if (!u) return ''
-  return `${abbreviateNumber(u.used)}/${abbreviateNumber(u.total)}`
+  return `${u.estimated ? '~' : ''}${abbreviateNumber(u.used)}/${abbreviateNumber(u.total)}`
 })
 
 const ctxWarn = computed(() => {
@@ -573,7 +573,10 @@ const ctxTitle = computed(() => {
   const u = ctxUsage.value
   if (!u) return ''
   const pct = Math.round((u.used / u.total) * 100)
-  return `上下文已用 ${formatNumber(u.used)} / ${formatNumber(u.total)}（${pct}%）——按上游实测的最近一轮 prompt tokens 计（含 reasoning 回传）；每轮对话都会带上全部历史，接近上限时建议手动压缩或开新会话`
+  const source = u.estimated
+    ? '压缩后的本地估算值，下一轮对话后按上游实测更新'
+    : '按上游实测的最近一轮 prompt tokens 计（含 reasoning 回传）'
+  return `上下文已用${u.estimated ? '约' : ''} ${formatNumber(u.used)} / ${formatNumber(u.total)}（${pct}%）——${source}；接近上限时建议手动压缩或开新会话`
 })
 
 function onKeydown(e: KeyboardEvent): void {
@@ -951,10 +954,10 @@ async function submit(): Promise<void> {
           </button>
           <div v-if="ctxInfoOpen && ctxUsage" class="composer__ctxinfo" @click.stop>
             <div class="composer__ctxinfo-line">
-              上下文已用 <b>{{ formatNumber(ctxUsage.used) }}</b> / {{ formatNumber(ctxUsage.total) }}（{{ ctxPct }}%），剩余约 {{ formatNumber(ctxUsage.total - ctxUsage.used) }}
+              上下文已用{{ ctxUsage.estimated ? '约' : '' }} <b>{{ formatNumber(ctxUsage.used) }}</b> / {{ formatNumber(ctxUsage.total) }}（{{ ctxPct }}%），剩余约 {{ formatNumber(Math.max(0, ctxUsage.total - ctxUsage.used)) }}
             </div>
             <div class="composer__ctxinfo-hint">
-              按上游实测的最近一轮 prompt tokens 计（含 reasoning 回传）；压缩后下一轮自动变小。<template v-if="settings.compactThreshold > 0">超过 {{ Math.round(settings.compactThreshold * 100) }}% 建议点右上角按钮手动压缩（旧历史压为摘要并冻结只读）。</template>
+              {{ ctxUsage.estimated ? '压缩后的本地估算值，下一轮对话后按上游实测更新。' : '按上游实测的最近一轮 prompt tokens 计（含 reasoning 回传）。' }}<template v-if="settings.compactThreshold > 0">超过 {{ Math.round(settings.compactThreshold * 100) }}% 建议点右上角按钮手动压缩（旧历史压为摘要并冻结只读）。</template>
             </div>
           </div>
         </div>

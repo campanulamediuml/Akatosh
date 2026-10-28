@@ -46,7 +46,7 @@ func TestForkConversationFromMessage(t *testing.T) {
 	}
 
 	// 压缩冻结到 m2：fork 要把这个状态带走
-	if err := st.SetConversationSummary(conv.ID, "前两条的摘要", msgIDs[1]); err != nil {
+	if err := st.SetConversationSummary(conv.ID, "前两条的摘要", msgIDs[1], 123); err != nil {
 		t.Fatal(err)
 	}
 
@@ -64,6 +64,9 @@ func TestForkConversationFromMessage(t *testing.T) {
 	}
 	if fork.Summary != "前两条的摘要" {
 		t.Errorf("摘要没带走: %q", fork.Summary)
+	}
+	if fork.ContextEstimate != 123 {
+		t.Errorf("上下文估算值没带走: %d", fork.ContextEstimate)
 	}
 	// compacted_before 必须重映射到新 id：冻结的是原前 2 条 → 第 2 条复制后的新 id
 	fmsgsEarly, _ := st.ListMessages(fork.ID)

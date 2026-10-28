@@ -64,6 +64,54 @@ func (s *Session) notifyCompact(level, text string) {
 	})
 }
 
+const (
+	compactRunesPerToken   = 4
+	compactMessageOverhead = 4
+)
+
+func compactTextTokens(text string) int {
+	return (utf8.RuneCountInString(text) + compactRunesPerToken - 1) / compactRunesPerToken
+}
+
+func compactMessageTokens(m store.Message) int {
+	return compactMessageOverhead + compactTextTokens(m.Content) + compactTextTokens(m.Reasoning) + compactTextTokens(m.ToolRounds)
+}
+
+func compactSummaryTokens(summary string) int {
+	if strings.TrimSpace(summary) == "" {
+		return 0
+	}
+	return compactMessageOverhead + compactTextTokens(summary)
+}
+
+// estimateCompactedContext 用最近一次上游实测 prompt 为锚点，只估算本次压缩的增量。
+// 没有锚点时才对摘要、system prompt 和保留消息做完整的本地估算。
+func estimateCompactedContext(conv *store.Conversation, msgs []store.Message, beforeID int64, removedTokens int, summary string) int {
+	anchor := 0
+	for i := len(msgs) - 1; i >= 0; i-- {
+		m := msgs[i]
+		if m.Role == store.RoleAssistant && m.Status != store.StatusStreaming && m.Usage.PromptTokens > 0 {
+			anchor = m.Usage.PromptTokens
+			break
+		}
+	}
+	if anchor > 0 {
+		estimate := anchor - removedTokens + compactSummaryTokens(summary)
+		if estimate < 0 {
+			return 0
+		}
+		return estimate
+	}
+
+	estimate := compactSummaryTokens(summary) + compactTextTokens(conv.SystemPrompt) + compactTextTokens(currentDatePrompt())
+	for _, m := range msgs {
+		if m.ID > beforeID && m.Status != store.StatusStreaming && m.Status != store.StatusError {
+			estimate += compactMessageTokens(m)
+		}
+	}
+	return estimate
+}
+
 // runCompact 执行一次压缩。所有结局都会广播通知（成功/失败/无需压缩），
 // 日志同步留底。compacting 状态的置位/解除由调用方（handleCompact）负责。
 func (s *Session) runCompact() {
@@ -110,6 +158,7 @@ func (s *Session) runCompact() {
 	runes := 0
 	included := 0
 	beforeID := int64(0)
+	removedTokens := compactSummaryTokens(conv.Summary)
 	for _, m := range fresh {
 		if m.Status != store.StatusDone || strings.TrimSpace(m.Content) == "" {
 			continue
@@ -126,6 +175,7 @@ func (s *Session) runCompact() {
 		sb.WriteString(line)
 		included++
 		beforeID = m.ID
+		removedTokens += compactMessageTokens(m)
 	}
 	// 少于 2 条实际内容不值得压（防生成失败后反复触发琐碎压缩）；
 	// 它们会留到下次一起压（没被冻结，历史里仍在）
@@ -151,7 +201,7 @@ func (s *Session) runCompact() {
 	}
 	summary, usage, err := cli.Complete(ctx, conv.ModelID, []llm.ChatMessage{
 		{Role: store.RoleUser, Content: fmt.Sprintf(compactPromptTmpl, target) + sb.String()},
-	}, target*2)
+	}, target*2, conv.Effort)
 	if err != nil {
 		log.Printf("[compact] 会话 %d 摘要生成失败: %v", s.convID, err)
 		if ctx.Err() == context.DeadlineExceeded {
@@ -167,7 +217,8 @@ func (s *Session) runCompact() {
 		s.notifyCompact("error", "压缩失败：模型返回了空摘要")
 		return
 	}
-	if err := s.mgr.st.SetConversationSummary(s.convID, summary, beforeID); err != nil {
+	contextEstimate := estimateCompactedContext(conv, msgs, beforeID, removedTokens, summary)
+	if err := s.mgr.st.SetConversationSummary(s.convID, summary, beforeID, contextEstimate); err != nil {
 		log.Printf("[compact] 会话 %d 写入摘要失败: %v", s.convID, err)
 		s.notifyCompact("error", "压缩失败：写入摘要出错")
 		return

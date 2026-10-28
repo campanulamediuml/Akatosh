@@ -35,12 +35,7 @@ type Server struct {
 	filesDir string
 
 	// exposed 为 true 表示用户把服务绑到了非回环地址（主动对外提供访问）。
-	// 只用来打启动告警 —— **不再用它放宽 Host 校验**，见 hostAllowed。
 	exposed bool
-
-	// allowHosts 是额外放行的主机名（非 IP 字面量）。
-	// 正常用 IP 访问不需要它；用机器名 / MagicDNS 名字访问时才要配。
-	allowHosts []string
 
 	// lastSeenMu/lastSeen 是 last_seen_at 的节流表：
 	// 每个用户每分钟最多写一次库，免得每个 API 请求都 UPDATE users。
@@ -51,11 +46,6 @@ type Server struct {
 // Option 用来扩展 Server 配置。
 // 用变参而不是加必填形参，是为了不破坏既有调用点（含测试）。
 type Option func(*Server)
-
-// WithAllowHosts 设置额外放行的主机名白名单（逗号分隔或直接给切片）。
-func WithAllowHosts(hosts []string) Option {
-	return func(s *Server) { s.allowHosts = hosts }
-}
 
 // WithFilesDir 设置上传文档的存放目录（misc/files）。
 func WithFilesDir(dir string) Option {
@@ -163,8 +153,7 @@ func (s *Server) routes() {
 }
 
 func (s *Server) Handler() http.Handler {
-	// 顺序：panic 兜底 → gzip → Host/Origin 校验 → 令牌引导 → 令牌鉴权 → 路由。
-	// 把 guard 放最前面：rebinding 请求连令牌都不用看就直接拒。
+	// 顺序：panic 兜底 → gzip → Origin 校验 → 令牌引导 → 令牌鉴权 → 路由。
 	return recoverer(gzipMiddleware(s.guard(s.bootstrapToken(s.requireToken(s.mux)))))
 }
 
@@ -196,25 +185,9 @@ func (g *gzipResponseWriter) Write(p []byte) (int, error) { return g.w.Write(p) 
 
 // ---------- 中间件 ----------
 
-// guard 挡两种东西：DNS rebinding 和跨源请求。
-//
-// 为什么本地服务也需要这个：浏览器里的 JS 能访问 127.0.0.1，防火墙和「只绑回环」
-// 拦的都是外部主机。攻击链是——你打开 evil.com:28888（攻击者的服务器），页面里的 JS
-// 在攻击者把 evil.com 的 DNS 改指向 127.0.0.1 之后请求 /api/conversations，于是这个
-// 请求落到你本机的服务上；而浏览器认为页面和请求同源（都是 evil.com:28888），
-// 不会有任何 CORS 拦截，JS 能把你的对话和 CoT 全读走。
-//
-// 拦截点选在 Host 而不是 Origin：**同源 GET 请求浏览器不发 Origin**，只查 Origin
-// 挡不住最主要的读数据路径。而 Host 一定存在，且正常访问它只会是 IP 字面量或
-// localhost，DNS rebinding 却必然带一个攻击者域名过来。
+// guard 拒绝跨源请求。Host 不限制，以便通过任意 NAT 域名访问。
 func (s *Server) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !s.hostAllowed(r.Host) {
-			writeErr(w, http.StatusForbidden, "forbidden",
-				"已拒绝该 Host 的请求（疑似 DNS rebinding）。请用 127.0.0.1 或局域网 IP 访问；"+
-					"确实要用主机名，请启动时加 -allow-host。")
-			return
-		}
 		if o := r.Header.Get("Origin"); o != "" && !originAllowed(o, r.Host) {
 			writeErr(w, http.StatusForbidden, "forbidden", "已拒绝跨源请求")
 			return
@@ -223,76 +196,7 @@ func (s *Server) guard(next http.Handler) http.Handler {
 	})
 }
 
-// hostAllowed 判断请求的 Host 是否可以接受。
-//
-// 这里曾经有个洞：只要用户绑了非回环地址（手机访问必须这么做），就整体返回 true，
-// 等于把 DNS rebinding 防线整个关掉了。实测 Host=evil.com:28888 配
-// Origin=http://evil.com:28888 能拿到 200 —— 而“绑 0.0.0.0”正是用手机的唯一方式。
-//
-// 现在的规则与绑定地址无关，一律：
-//   - IP 字面量 / localhost        → 放行（手机用局域网 IP 访问走的就是这条）
-//   - 在 -allow-host 白名单里      → 放行（用机器名 / MagicDNS 名字访问时）
-//   - 其它（必然是某个域名）        → 拒绝
-//
-// 域名访问被拒不会影响手机：启动日志里打的就是 IP 形式的地址。
-func (s *Server) hostAllowed(host string) bool {
-	if hostIsLiteral(host) {
-		return true
-	}
-	return s.hostInAllowList(host)
-}
-
-// hostInAllowList 匹配 -allow-host 里的主机名。
-// 支持精确匹配（my-pc、my-pc:28888）和前缀通配（*.local、*.ts.net）。
-// 端口一律忽略后再比：用户写 my-pc，实际 Host 是 my-pc:28888，不该要求他写端口。
-func (s *Server) hostInAllowList(host string) bool {
-	if len(s.allowHosts) == 0 {
-		return false
-	}
-	full := strings.ToLower(strings.TrimSpace(host))
-	name := full
-	if h, _, err := net.SplitHostPort(full); err == nil {
-		name = h
-	}
-	name = strings.Trim(name, "[]")
-	if name == "" {
-		return false
-	}
-	for _, pat := range s.allowHosts {
-		p := strings.ToLower(strings.TrimSpace(pat))
-		if p == "" {
-			continue
-		}
-		if p == full || p == name {
-			return true
-		}
-		if suffix, ok := strings.CutPrefix(p, "*"); ok && strings.HasSuffix(name, suffix) {
-			return true
-		}
-	}
-	return false
-}
-
-// hostIsLiteral 判断 Host 是不是 IP 字面量或 localhost。
-// 用 127.0.0.1 / ::1 / localhost 访问都合法；带域名的请求一律拒绝，
-// 因为正常使用不会出现域名，而 DNS rebinding 必须有域名才能成立。
-func hostIsLiteral(host string) bool {
-	h := host
-	if hostOnly, _, err := net.SplitHostPort(host); err == nil {
-		h = hostOnly
-	}
-	h = strings.Trim(strings.TrimSpace(h), "[]")
-	if h == "" {
-		return false
-	}
-	if strings.EqualFold(h, "localhost") {
-		return true
-	}
-	return net.ParseIP(h) != nil
-}
-
 // bindIsExposed 判断监听地址是不是「主动对外」。
-// 只用于启动时打告警，不再影响 Host 校验（那曾是个洞，见 hostAllowed）。
 func bindIsExposed(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {

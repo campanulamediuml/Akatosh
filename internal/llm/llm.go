@@ -233,14 +233,14 @@ func New(baseURL, apiKey string) *Client {
 		BaseURL: NormalizeBaseURL(baseURL),
 		APIKey:  apiKey,
 		HTTP: &http.Client{
-			// 不设 Timeout：长回答可能持续几分钟，超时由 context 控制。
+			// 不设 Timeout / ResponseHeaderTimeout：长回答和非流式高思考请求都可能
+			// 持续几分钟，超时由调用方的 context 控制（压缩 8 分钟、起标题 45 秒）。
 			Transport: &http.Transport{
 				Proxy:                 http.ProxyFromEnvironment,
 				MaxIdleConns:          16,
 				MaxIdleConnsPerHost:   8,
 				IdleConnTimeout:       90 * time.Second,
 				TLSHandshakeTimeout:   15 * time.Second,
-				ResponseHeaderTimeout: 120 * time.Second,
 				ExpectContinueTimeout: 1 * time.Second,
 			},
 		},

@@ -219,6 +219,8 @@ export interface Conversation {
    */
   summary: string
   compacted_before: number
+  /** 压缩后对下一次请求 prompt tokens 的估算；0 = 使用上游实测值 */
+  context_estimate: number
   /** 该会话此刻是否正在压缩（内存态；压缩期间阻塞发送） */
   compacting: boolean
   pinned: boolean

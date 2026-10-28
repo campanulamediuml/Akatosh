@@ -36,6 +36,7 @@ func seedConv(t *testing.T, st *store.Store, n int) *store.Conversation {
 }
 
 // buildHistory：有摘要时历史 = system 摘要 + 近期消息，旧消息被排除。
+// actor 已经缓存压缩前 conv 时，也必须立即使用数据库里的最新压缩边界。
 func TestBuildHistoryWithSummary(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -43,16 +44,15 @@ func TestBuildHistoryWithSummary(t *testing.T) {
 	}
 	defer st.Close()
 	conv := seedConv(t, st, 20)
-
-	// 压到第 10 条（含），保留后 10 条
-	msgs, _ := st.ListMessages(conv.ID)
-	if err := st.SetConversationSummary(conv.ID, "前 10 条的摘要", msgs[9].ID); err != nil {
-		t.Fatal(err)
-	}
-
 	mgr := NewManager(st, NewBus(), nil)
 	s, err := mgr.getOrCreate(conv.ID)
 	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 会话 actor 创建后再压缩，模拟 runCompact 在独立 goroutine 写库的场景。
+	msgs, _ := st.ListMessages(conv.ID)
+	if err := st.SetConversationSummary(conv.ID, "前 10 条的摘要", msgs[9].ID, 0); err != nil {
 		t.Fatal(err)
 	}
 	hist := s.buildHistory("m")
@@ -90,7 +90,7 @@ func TestFrozenMessagesRejected(t *testing.T) {
 	defer st.Close()
 	conv := seedConv(t, st, 6)
 	msgs, _ := st.ListMessages(conv.ID)
-	if err := st.SetConversationSummary(conv.ID, "摘要", msgs[2].ID); err != nil {
+	if err := st.SetConversationSummary(conv.ID, "摘要", msgs[2].ID, 0); err != nil {
 		t.Fatal(err)
 	}
 

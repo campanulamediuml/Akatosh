@@ -48,7 +48,7 @@ type Store interface {
 	DeleteMessagesFrom(convID, id int64, inclusive bool) (int64, error)
 	AutoTitle(convID int64) (string, bool, error)
 	FirstUserMessage(convID int64) (string, error)
-	SetConversationSummary(id int64, summary string, beforeMsgID int64) error
+	SetConversationSummary(id int64, summary string, beforeMsgID int64, contextEstimate int) error
 	GetSetting(userID int64, key string) (string, error)
 	// GetModelFor 必须带供应商：多供应商下同名模型是两条不同记录
 	GetModelFor(providerID int64, modelID string) (*store.Model, error)

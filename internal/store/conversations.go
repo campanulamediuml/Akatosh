@@ -16,7 +16,7 @@ import (
 const convCols = `c.id, c.user_id, c.title, c.effort, c.provider_id,
 	COALESCE((SELECT p.name FROM providers p WHERE p.id = c.provider_id), '') AS provider_name,
 	c.model_id, c.system_prompt, c.web_search, c.pinned, c.archived,
-	c.summary, c.compacted_before,
+	c.summary, c.compacted_before, c.context_estimate,
 	(SELECT COUNT(*) FROM messages m WHERE m.conv_id = c.id), c.created_at, c.updated_at, c.last_read_at,
 	EXISTS(SELECT 1 FROM messages m WHERE m.conv_id = c.id AND m.role = 'assistant'
 	       AND m.finished_at > 0 AND m.finished_at > c.last_read_at) AS unread`
@@ -26,7 +26,7 @@ func scanConv(sc interface{ Scan(...any) error }) (*Conversation, error) {
 	var pinned, archived, unread, webSearch int
 	if err := sc.Scan(&c.ID, &c.UserID, &c.Title, &c.Effort, &c.ProviderID, &c.ProviderName,
 		&c.ModelID, &c.SystemPrompt, &webSearch, &pinned, &archived,
-		&c.Summary, &c.CompactedBefore,
+		&c.Summary, &c.CompactedBefore, &c.ContextEstimate,
 		&c.MessageCount, &c.CreatedAt, &c.UpdatedAt, &c.LastReadAt, &unread); err != nil {
 		return nil, err
 	}
@@ -305,16 +305,17 @@ func (s *Store) String() string { return fmt.Sprintf("store(%s)", s.path) }
 // SetConversationSummary 写入一次上下文压缩的结果：
 // summary 是 beforeMsgID（含）之前消息的压缩摘要，那些消息随之被冻结。
 // 滚动压缩（已有摘要再次压缩）由调用方负责把旧摘要合并进新摘要。
-func (s *Store) SetConversationSummary(id int64, summary string, beforeMsgID int64) error {
+// contextEstimate 供页面立即展示压缩后的用量，下一次上游 usage 返回后清零。
+func (s *Store) SetConversationSummary(id int64, summary string, beforeMsgID int64, contextEstimate int) error {
 	_, err := s.db.Exec(
-		`UPDATE conversations SET summary = ?, compacted_before = ? WHERE id = ?`,
-		summary, beforeMsgID, id)
+		`UPDATE conversations SET summary = ?, compacted_before = ?, context_estimate = ? WHERE id = ?`,
+		summary, beforeMsgID, contextEstimate, id)
 	return err
 }
 
 // ForkConversation 从 beforeMsgID（含）之前的历史全量值复制出一个新会话：
 // conversations / messages / message_attachments / message_files 四表各复制一段，
-// reasoning、search_log、usage、编辑标记、summary、compacted_before 全部带走。
+// reasoning、search_log、usage、编辑标记、summary、compacted_before、context_estimate 全部带走。
 // beforeMsgID = 0 表示复制整个会话（= 从最后一条消息分叉）。
 // 图片/文档本体不复制——按内容哈希去重，新消息只复制关联行（共享同一份）。
 // 新会话标题 = 原标题 + "-消息{id}-fork"（分叉锚点一目了然）。
@@ -347,10 +348,10 @@ func (s *Store) ForkConversation(convID, beforeMsgID, newUserID int64) (*Convers
 
 	now := NowMs()
 	res, err := s.db.Exec(
-		`INSERT INTO conversations(user_id, title, provider_id, model_id, effort, system_prompt, web_search, summary, compacted_before, created_at, updated_at, last_read_at)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO conversations(user_id, title, provider_id, model_id, effort, system_prompt, web_search, summary, compacted_before, context_estimate, created_at, updated_at, last_read_at)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		newUserID, fmt.Sprintf("%s-消息%d-fork", src.Title, anchor), src.ProviderID, src.ModelID, src.Effort, src.SystemPrompt,
-		b2i(src.WebSearch), src.Summary, src.CompactedBefore, now, now, now)
+		b2i(src.WebSearch), src.Summary, src.CompactedBefore, src.ContextEstimate, now, now, now)
 	if err != nil {
 		return nil, err
 	}
