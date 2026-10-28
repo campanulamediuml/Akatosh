@@ -575,7 +575,7 @@ const ctxTitle = computed(() => {
   const pct = Math.round((u.used / u.total) * 100)
   const source = u.estimated
     ? '压缩后的本地估算值，下一轮对话后按上游实测更新'
-    : '按上游实测的最近一轮 prompt tokens 计（含 reasoning 回传）'
+    : '按最后一次上游请求的 prompt tokens 计（含 reasoning 回传；工具多轮不累加）'
   return `上下文已用${u.estimated ? '约' : ''} ${formatNumber(u.used)} / ${formatNumber(u.total)}（${pct}%）——${source}；接近上限时建议手动压缩或开新会话`
 })
 
@@ -957,7 +957,7 @@ async function submit(): Promise<void> {
               上下文已用{{ ctxUsage.estimated ? '约' : '' }} <b>{{ formatNumber(ctxUsage.used) }}</b> / {{ formatNumber(ctxUsage.total) }}（{{ ctxPct }}%），剩余约 {{ formatNumber(Math.max(0, ctxUsage.total - ctxUsage.used)) }}
             </div>
             <div class="composer__ctxinfo-hint">
-              {{ ctxUsage.estimated ? '压缩后的本地估算值，下一轮对话后按上游实测更新。' : '按上游实测的最近一轮 prompt tokens 计（含 reasoning 回传）。' }}<template v-if="settings.compactThreshold > 0">超过 {{ Math.round(settings.compactThreshold * 100) }}% 建议点右上角按钮手动压缩（旧历史压为摘要并冻结只读）。</template>
+              {{ ctxUsage.estimated ? '压缩后的本地估算值，下一轮对话后按上游实测更新。' : '按最后一次上游请求的 prompt tokens 计（含 reasoning 回传；工具多轮不累加）。' }}<template v-if="settings.compactThreshold > 0">超过 {{ Math.round(settings.compactThreshold * 100) }}% 建议点右上角按钮手动压缩（旧历史压为摘要并冻结只读）。</template>
             </div>
           </div>
         </div>

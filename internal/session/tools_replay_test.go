@@ -103,25 +103,36 @@ func TestToolLogSummarySkipsImage(t *testing.T) {
 	}
 }
 
-// reasoning 预算：带 tool_calls 的消息（重放轮）reasoning 是上游硬规则，不丢。
-func TestReasoningBudgetKeepsToolCallReasoning(t *testing.T) {
+func TestReasoningPolicyWithToolsKeepsFullHistory(t *testing.T) {
 	long := strings.Repeat("想", 40000)
 	call := llm.ToolCall{ID: "c1", Type: "function"}
 	call.Function.Name = imagegen.ToolName
 	msgs := []llm.ChatMessage{
-		{Role: store.RoleAssistant, Content: "旧回复", Reasoning: long},                                   // 应被预算丢掉
-		{Role: store.RoleAssistant, Content: "", Reasoning: "工具轮的思考", ToolCalls: []llm.ToolCall{call}}, // 硬规则，必留
+		{Role: store.RoleAssistant, Content: "旧回复", Reasoning: long},
+		{Role: store.RoleAssistant, Content: "", Reasoning: "工具轮的思考", ToolCalls: []llm.ToolCall{call}},
 		{Role: store.RoleAssistant, Content: "新回复", Reasoning: "最近的思考"},
 	}
-	applyReasoningBudget(msgs)
-	if msgs[0].Reasoning != "" {
-		t.Fatal("超长旧 reasoning 应被丢弃")
+	applyReasoningPolicy(msgs, true)
+	for i, want := range []string{long, "工具轮的思考", "最近的思考"} {
+		if msgs[i].Reasoning != want {
+			t.Fatalf("带 tools 时第 %d 条 reasoning 应完整保留", i)
+		}
 	}
-	if msgs[1].Reasoning != "工具轮的思考" {
-		t.Fatal("tool_calls 消息的 reasoning 不允许被预算丢弃（上游 400 硬规则）")
+}
+
+func TestReasoningPolicyWithoutToolsDropsHistory(t *testing.T) {
+	msgs := []llm.ChatMessage{
+		{Role: store.RoleAssistant, Content: "旧回复", Reasoning: "旧思考"},
+		{Role: store.RoleAssistant, Content: "新回复", Reasoning: "最近的思考"},
 	}
-	if msgs[2].Reasoning != "最近的思考" {
-		t.Fatal("最近的 reasoning 应保留")
+	applyReasoningPolicy(msgs, false)
+	for i := range msgs {
+		if msgs[i].Reasoning != "" {
+			t.Fatalf("不带 tools 时第 %d 条 reasoning 不应回传", i)
+		}
+		if msgs[i].Content == "" {
+			t.Fatalf("第 %d 条正文不应受 reasoning 策略影响", i)
+		}
 	}
 }
 

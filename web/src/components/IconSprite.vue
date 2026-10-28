@@ -49,6 +49,7 @@
         <circle cx="8" cy="8" r="2.1" fill="none" stroke="currentColor" stroke-width="1.3" />
         <path
           d="M8 1.6l1 1.6 1.86-.42.33 1.87 1.75.78-.94 1.66.94 1.66-1.75.78-.33 1.87-1.86-.42-1 1.6-1-1.6-1.86.42-.33-1.87-1.75-.78.94-1.66-.94-1.66 1.75-.78.33-1.87 1.86.42z"
+          transform="translate(0 0.91)"
           fill="none"
           stroke="currentColor"
           stroke-width="1.1"

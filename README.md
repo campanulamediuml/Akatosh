@@ -25,7 +25,8 @@ Go 后端 + Vue 3 前端，前端产物嵌入单个可执行文件，只监听�
 - **图像生成（function calling）**：配了 `-imagegen` 就全局可用，模型自主调用 `generate_image`
   画图，生成的图落进附件库、随消息展示（也能贴图追问）
 - **文档上传**：回形针可以选 PDF / DOCX / XLSX / 文本 / 代码等文件（单文件 20 MB），
-  模型通过 `read_file` 在沙箱里提取内容后讨论；需要 `-pybox`
+  模型通过 `read_file` 在沙箱里提取内容后讨论；扫描件 PDF 可由模型指定页码，逐批渲染成图片
+  直接阅读（每次最多 5 页）；需要 `-pybox`
 - **手动上下文压缩**：会话窗口右上角的按钮把较早的历史压成摘要（保留最近 10 条不动），
   被压掉的消息冻结为只读；会话自己的 system prompt 永远不参与压缩。`-compact-threshold`
   控制提示时机，压缩永远手动触发
@@ -65,7 +66,7 @@ Go 后端 + Vue 3 前端，前端产物嵌入单个可执行文件，只监听�
 - 缓存命中部分通常便宜一个数量级，所以命中率单独算出来 —— 一眼能看出这次是不是白花钱了。
   上游两种写法（DeepSeek 的 `prompt_cache_hit_tokens`、OpenAI 的 `prompt_tokens_details.cached_tokens`）都会认。
   提醒：缓存有最小粒度（DeepSeek 是 64 token），前缀太短时命中率天然是 0，这是正常的。
-- 同样的用量也落库，消息底部会显示 `↑输入 ↓输出 · 思考 N · 缓存 X%`。
+- 同样的用量也落库，消息底部会显示 `↑输入 ↓输出 · 思考 N · 缓存 X%`。工具多轮时消息用量按各次请求累加（成本口径），输入栏的上下文占用只取最后一次请求的 `prompt_tokens`，不会把重复发送的历史反复计入。
 
 ## 界面
 
@@ -276,7 +277,7 @@ SearXNG 的 `settings.yml` 里要把 `search.formats` 加上 `json`（默认只�
 ### Python 代码执行（可选）
 
 仓库只提供沙箱镜像的 `Dockerfile.pybox`：Python 3.13 + 预装的 numpy / matplotlib /
-sympy / pypdf / python-docx / openpyxl / chardet（沙箱断网，模型写的代码 import 不了
+sympy / pypdf / pymupdf / python-docx / openpyxl / chardet（沙箱断网，模型写的代码 import 不了
 装不了的包），以非 root（nobody）运行。除此之外**镜像里没有别的隔离**——断网、只读、
 资源限额要靠你的部署方式补上，一样都不能少：
 
@@ -284,11 +285,13 @@ sympy / pypdf / python-docx / openpyxl / chardet（沙箱断网，模型写的�
   这是最重要的一道）；
 - 只读根文件系统 + tmpfs `/tmp`（可写目录只有 /tmp）；
 - 内存 / CPU / PID 限额（如 256MB / 0.5 CPU / 64 PID）、`no-new-privileges`；
-- 上传的文档目录以**只读**方式挂进沙箱（`read_file` 靠 pybox 里的库提取文本）。
+- 上传的文档目录以**只读**方式挂进沙箱（`read_file` 靠 pybox 提取文本或渲染 PDF 页面）。
 
 配了 `-pybox http://pybox:8000` 之后 `run_python` 工具全局可用（无开关：
 沙箱执行没有副作用，模型自己决定什么时候该跑代码）。执行记录（代码 + 输出）
 和搜索摘要一样落在消息的「工具调用」折叠块里。文档上传（`read_file`）同样依赖这个沙箱。
+PDF 默认提取文本并报告总页数；模型可对扫描件或复杂版面传 `images=true` 和 `pages`，
+每次最多 5 页，页面以 160 DPI JPEG 回传。图片只在当前工具循环使用，跨轮需要时会重新读取。
 
 ---
 
@@ -361,10 +364,9 @@ API.md                      前后端接口契约
 
 ## 一些实现上的坑（都已在代码里处理）
 
-- **CoT 是会回传上游的，但有纪律**。带 tools 的请求里，历史轮次的 `reasoning_content` 必须
-  回传（DeepSeek 官方规则：会拼接进上下文保持思考连贯，不回传直接 400）；不带 tools 时上游
-  直接忽略，无副作用。编辑过的 CoT 也原样回传。跨轮历史有 32768 字符的总预算，超预算时从
-  最早的消息开始丢弃（正文保留；带 tool_calls 的工具轮是上游硬规则的例外，永远保留、不占预算）。
+- **CoT 按请求是否带 tools 决定回传策略**。带 tools 时完整回传历史 `reasoning_content`
+  （DeepSeek 官方规则：会拼接进上下文保持思考连贯，不回传可能直接 400）；不带 tools 时不回传
+  历史 CoT，只保留正文和工具调用结构。编辑过的 CoT 在带 tools 时同样原样回传。
 - **思考强度是数据驱动的**。档位来自 `/models` 里上游声明的 `supported_efforts`，没声明就按模型名推断；
   遇到不认识 `reasoning_effort` 的网关返回 400 时会自动去掉该参数重试一次。
 - **落库节流**。流式内容每 250ms 写一次库，而不是每个 token 一次。而 `state` 接口会另外补上内存里的实时值，

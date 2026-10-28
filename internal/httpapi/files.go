@@ -29,7 +29,7 @@ var uploadFileExts = map[string]bool{
 	"toml": true, "ini": true, "sql": true, "html": true, "css": true,
 	"py": true, "js": true, "ts": true, "go": true, "java": true,
 	"c": true, "h": true, "cpp": true, "rs": true, "sh": true,
-	// 文档（pybox 用 pypdf / python-docx / openpyxl 提取）
+	// 文档（pybox 提取文本；PDF 也可用 pymupdf 将指定页渲染成图片）
 	"pdf": true, "docx": true, "xlsx": true,
 }
 

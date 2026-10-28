@@ -42,6 +42,8 @@ interface FileEntry {
   type?: string // 'file'
   name: string
   id?: number
+  pages?: number[]
+  images?: boolean
   error?: string
 }
 
@@ -179,10 +181,12 @@ function hostOf(url: string): string {
 
       <div v-if="openCards.has(i)" class="reasoning__body searchlog__body">
         <div class="searchlog__entry">
-          <!-- 文件读取记录（read_file：pybox 沙箱提取文本） -->
+          <!-- 文件读取记录（read_file：pybox 提取文本或渲染 PDF 页面） -->
           <template v-if="isFile(e)">
             <div v-if="e.error" class="searchlog__error">{{ e.error }}</div>
-            <div v-else class="searchlog__none">提取完成（内容已发给模型，这里不重复展开）</div>
+            <div v-else class="searchlog__none">
+              {{ e.images ? '页面渲染完成' : '提取完成' }}<template v-if="e.pages?.length">（第 {{ e.pages.join('、') }} 页）</template>（内容已发给模型，这里不重复展开）
+            </div>
           </template>
 
           <!-- 图像生成记录（图片本体在消息附件区显示，这里只记 prompt） -->

@@ -93,3 +93,44 @@ func TestToolDefShape(t *testing.T) {
 		t.Fatalf("工具声明不对: %+v", def)
 	}
 }
+
+func TestRenderPDF(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/render-pdf" {
+			t.Errorf("路径不对: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"total_pages":3,"images":[{"page":1,"mime":"image/jpeg","data":"aGVsbG8="},{"page":3,"mime":"image/jpeg","data":"d29ybGQ="}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	out, err := New(srv.URL).RenderPDF(context.Background(), "/files/scan.pdf", []int{1, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.TotalPages != 3 || len(out.Images) != 2 || out.Images[1].Page != 3 || out.Images[1].Data != "d29ybGQ=" {
+		t.Fatalf("渲染结果不对: %+v", out)
+	}
+}
+
+func TestRenderPDFRejectsBadResponses(t *testing.T) {
+	for name, body := range map[string]string{
+		" malformed ":     `{"total_pages":`,
+		" invalid image ": `{"total_pages":2,"images":[{"page":3,"mime":"image/jpeg","data":"aGVsbG8="}]}`,
+	} {
+		t.Run(strings.TrimSpace(name), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprint(w, body)
+			}))
+			t.Cleanup(srv.Close)
+			if _, err := New(srv.URL).RenderPDF(context.Background(), "/files/scan.pdf", []int{1}); err == nil {
+				t.Fatal("无效渲染响应应返回错误")
+			}
+		})
+	}
+}
+
+func TestSandboxTimeoutCoversPyboxExecution(t *testing.T) {
+	if got := New("http://pybox").HTTP.Timeout.Seconds(); got < 25 {
+		t.Fatalf("Go 客户端不应早于 pybox 的 20 秒执行上限超时: %.0fs", got)
+	}
+}

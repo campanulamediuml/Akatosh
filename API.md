@@ -407,7 +407,7 @@ OpenAI 系只报 `prompt_tokens_details.cached_tokens`，后端会把两种归�
 `search_log` 是本轮工具调用的 JSON 摘要（展示用），空串 = 本轮没调工具。数组元素的 `type`：
 `"search"`（含 `query` 与 `results:[{title,url}]`，失败时还有 `error`）、`"python"`
 （`code` / `stdout` / `stderr` / `exit_code`）、`"image"`（`prompt`，生成的图本体在 `attachments` 里）、
-`"file"`（`name` / `id`，read_file 的读取记录）。工具交互的完整记录（tool_rounds）只面向模型
+`"file"`（`name` / `id`，以及可选的 `pages` / `images`，read_file 的读取记录）。工具交互的完整记录（tool_rounds）只面向模型
 回放，**不**随 API 下发。
 
 `seg_usages` 是工具轮里**各段上游请求各自的 usage**（`usage` 是它们的**累加值**；
@@ -542,7 +542,9 @@ POST /api/conversations/{id}/messages
 
 上传的文档存在 `misc/files/`（按内容 sha256 去重），**没有**对应的下载/查看接口——
 文件内容只在模型调用 `read_file` 工具时由 pybox 沙箱按需提取（pypdf / python-docx / openpyxl，
-提取结果截断到约 30000 字符），前端展示 `name` / `size` 即可。
+提取结果截断到约 30000 字符），前端展示 `name` / `size` 即可。PDF 还支持 `pages` 与
+`images=true`：模型自主指定页码，pybox 用 PyMuPDF 将这些页渲染成 JPEG，通过工具多段 content
+回传给视觉模型；每次最多 5 页，不自动渲染整份文档。
 
 ```
 POST /api/files    multipart/form-data，字段名 file（可以带多个），单文件 ≤20MB

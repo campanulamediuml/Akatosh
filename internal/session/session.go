@@ -10,7 +10,6 @@ import (
 	"os"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"aiassistant/internal/imagegen"
 	"aiassistant/internal/llm"
@@ -708,6 +707,27 @@ func effortLabel(effort string) string {
 	return effort
 }
 
+func (s *Session) toolDefs() []llm.Tool {
+	var tools []llm.Tool
+	// 联网搜索是会话级开关；Python 沙箱与图像生成配了执行端就全局可用。
+	if s.conv != nil && s.conv.WebSearch && s.mgr.search != nil {
+		tools = append(tools, search.ToolDef())
+	}
+	if s.mgr.sandbox != nil {
+		tools = append(tools, sandbox.ToolDef())
+	}
+	if s.mgr.imagegen != nil {
+		tools = append(tools, imagegen.ToolDef())
+	}
+	if s.mgr.media != nil {
+		tools = append(tools, readAttachmentToolDef())
+	}
+	if s.mgr.sandbox != nil && s.mgr.media != nil {
+		tools = append(tools, readFileToolDef())
+	}
+	return tools
+}
+
 func (s *Session) beginGeneration(cli *llm.Client, msgID, providerID int64, modelID, effort string, history []llm.ChatMessage) {
 	ctx, cancel := context.WithCancel(context.Background())
 	gen := &generation{
@@ -717,29 +737,11 @@ func (s *Session) beginGeneration(cli *llm.Client, msgID, providerID int64, mode
 		effort:     effort,
 		startedAt:  store.NowMs(),
 		history:    history,
+		tools:      s.toolDefs(),
 		startRes:   make(chan streamStart, 1),
 		toolRes:    make(chan toolExecResult, 1),
 		ctx:        ctx,
 		cancel:     cancel,
-	}
-	// 工具声明：联网搜索是会话级开关；Python 沙箱与图像生成没有副作用开关——
-	// 配了执行端就全局可用，模型自己决定要不要用。
-	if s.conv != nil && s.conv.WebSearch && s.mgr.search != nil {
-		gen.tools = append(gen.tools, search.ToolDef())
-	}
-	if s.mgr.sandbox != nil {
-		gen.tools = append(gen.tools, sandbox.ToolDef())
-	}
-	if s.mgr.imagegen != nil {
-		gen.tools = append(gen.tools, imagegen.ToolDef())
-	}
-	// 回看图片：配了附件存储就可用（读本地库，零外部依赖）
-	if s.mgr.media != nil {
-		gen.tools = append(gen.tools, readAttachmentToolDef())
-	}
-	// 读文档：需要 pybox（提取）+ misc（存文件）
-	if s.mgr.sandbox != nil && s.mgr.media != nil {
-		gen.tools = append(gen.tools, readFileToolDef())
 	}
 	if len(gen.tools) > 0 {
 		// 工具纪律：模型「嘴硬」（没调用却声称调用过）是 tool calling 的顽疾，
@@ -1014,15 +1016,49 @@ func (s *Session) execToolCall(g *generation, e *toolExecEntry) {
 			e.output = `{"error": "这个部署没有配置 Python 沙箱，无法读取文件"}`
 			return
 		}
-		id := parseAttachmentID(e.call.Function.Arguments)
-		f, err := s.mgr.st.GetFileInConv(id, s.convID)
+		args, err := parseReadFileArgs(e.call.Function.Arguments)
+		if err != nil {
+			e.output = fmt.Sprintf(`{"error": %q}`, err.Error())
+			return
+		}
+		f, err := s.mgr.st.GetFileInConv(args.ID, s.convID)
 		if err != nil || f == nil {
 			e.output = `{"error": "文件不存在或不属于这个会话"}`
 			return
 		}
-		// 提取丢给 pybox：/files 是宿主机只读挂载，pypdf/docx/openpyxl/chardet 已预装
+		e.record = map[string]any{"type": "file", "name": f.Name, "id": f.ID, "images": args.Images}
+		if len(args.Pages) > 0 {
+			e.record.(map[string]any)["pages"] = args.Pages
+		}
+		isPDF := strings.EqualFold(f.Ext, ".pdf")
+		if (args.Images || len(args.Pages) > 0) && !isPDF {
+			e.output = `{"error": "pages 和 images 参数只支持 PDF 文件"}`
+			return
+		}
 		path := "/files/" + f.Hash + f.Ext
-		r, err := s.mgr.sandbox.Run(g.ctx, fileExtractScript(path))
+		if args.Images {
+			if !supportsImageToolReceipt(g.modelID) {
+				e.output = `{"error": "当前模型不支持工具结果带图，无法按图片读取 PDF"}`
+				return
+			}
+			rendered, err := s.mgr.sandbox.RenderPDF(g.ctx, path, args.Pages)
+			if err != nil {
+				e.output = fmt.Sprintf(`{"error": %q}`, "PDF 页面渲染失败："+err.Error())
+				return
+			}
+			parts := []llm.ContentPart{llm.TextPart(fmt.Sprintf(
+				"PDF 文件 %q 共 %d 页。以下是指定页面的图片；图片仅在当前工具轮可用，后续需要时请重新调用 read_file。",
+				f.Name, rendered.TotalPages))}
+			for _, img := range rendered.Images {
+				parts = append(parts,
+					llm.TextPart(fmt.Sprintf("\n--- PDF 第 %d 页 ---", img.Page)),
+					llm.ImagePart("data:"+img.MIME+";base64,"+img.Data))
+			}
+			e.outputParts = parts
+			return
+		}
+		// 文本提取丢给 pybox：/files 是宿主机只读挂载，pypdf/docx/openpyxl/chardet 已预装
+		r, err := s.mgr.sandbox.Run(g.ctx, fileExtractScript(path, args.Pages))
 		var text string
 		if err != nil {
 			text = "提取失败: " + err.Error()
@@ -1036,7 +1072,6 @@ func (s *Session) execToolCall(g *generation, e *toolExecEntry) {
 			}
 		}
 		e.output = fmt.Sprintf(`{"name": %q, "content": %q}`, f.Name, truncateRunes(text, 30000))
-		e.record = map[string]any{"type": "file", "name": f.Name, "id": f.ID}
 	default:
 		log.Printf("[gen] 会话 %d 模型调用了未知工具 %q，按失败结果回传", s.convID, e.call.Function.Name)
 		e.output = fmt.Sprintf(`{"error": %q}`, "未知工具 "+e.call.Function.Name)
@@ -1299,12 +1334,8 @@ func currentDatePrompt() string {
 
 // buildHistory 组装发给上游的消息历史。
 //
-// reasoning_content 的回传规则（DeepSeek 官方 thinking_mode 文档 + 实测）：
-//   - 携带 tools 的请求：历史 assistant 消息均应回传 reasoning_content
-//     （拼接进上下文，保持思考连贯）；tool 循环内不回传直接 400。
-//   - 不携带 tools 的请求：传不传无所谓，上游会忽略。
-//
-// 所以这里统一回传（用户消息没有 reasoning，omitempty 不输出）。
+// reasoning_content 按 DeepSeek 规则处理：携带 tools 时完整回传历史思考；
+// 不携带 tools 时不回传历史思考。用户消息没有 reasoning（omitempty 不输出）。
 // 带图片的用户消息会拼成多段 content（vision），读的是「发送版」而不是原图。
 // 注意只有**用户消息**带图：assistant 消息挂图（比如 AI 生成的图）会被上游
 // 直接拒绝（DeepSeek: "Image in assistant message is not supported"）——
@@ -1466,37 +1497,18 @@ func (s *Session) buildHistory(modelID string) []llm.ChatMessage {
 			s.convID, imageCount, float64(imageBytes)/1024, replayImages, float64(replayBytes)/1024)
 	}
 
-	// 跨轮回传的 reasoning 预算。tool 循环内必须完整回传（上游 400 硬规则），
-	// 但跨轮官方不强制——长 CoT 会话全量回传会让每轮 prompt 都重发全部历史
-	// 思考（26 万字 CoT 的会话下一条消息就是 26 万起跳）。超预算时从最早的
-	// 消息开始丢弃 reasoning（正文保留；最近的思路才是连贯性最需要的）。
-	applyReasoningBudget(out)
+	applyReasoningPolicy(out, len(s.toolDefs()) > 0)
 	return out
 }
 
-// reasoningBudgetRunes 是跨轮历史里 reasoning_content 的总量预算（字符）。
-const reasoningBudgetRunes = 32768
-
-// applyReasoningBudget 从最新的消息往回保留 reasoning，超预算的旧消息置空。
-// 例外：带 tool_calls 的消息（重放的生图工具轮）reasoning 是上游 400 硬规则，
-// 永远保留、不占预算——丢正文思考可以，丢它会直接报错。
-func applyReasoningBudget(msgs []llm.ChatMessage) {
-	total := 0
-	dropped := 0
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Reasoning == "" || len(msgs[i].ToolCalls) > 0 {
-			continue
-		}
-		n := utf8.RuneCountInString(msgs[i].Reasoning)
-		if total+n > reasoningBudgetRunes {
-			msgs[i].Reasoning = ""
-			dropped++
-		} else {
-			total += n
-		}
+// applyReasoningPolicy 按 DeepSeek 规则处理历史 reasoning：带 tools 时完整回传，
+// 不带 tools 时不回传；正文和工具调用结构始终保留。
+func applyReasoningPolicy(msgs []llm.ChatMessage, withTools bool) {
+	if withTools {
+		return
 	}
-	if dropped > 0 {
-		log.Printf("[gen] 跨轮 reasoning 超预算（%d 字），丢弃了 %d 条较早的思考", reasoningBudgetRunes, dropped)
+	for i := range msgs {
+		msgs[i].Reasoning = ""
 	}
 }
 

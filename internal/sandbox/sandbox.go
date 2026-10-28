@@ -53,8 +53,8 @@ func New(baseURL string) *Client {
 	return &Client{
 		BaseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		HTTP: &http.Client{
-			// pybox 自己的执行超时是 10s，这里留一点富余
-			Timeout: 15 * time.Second,
+			// pybox 单次执行上限是 20s，这里留一点网络和处理富余。
+			Timeout: 25 * time.Second,
 		},
 	}
 }
@@ -85,6 +85,60 @@ func (c *Client) Run(ctx context.Context, code string) (Result, error) {
 	}
 	out.Stdout = truncateRunes(out.Stdout, maxOutputRunes)
 	out.Stderr = truncateRunes(out.Stderr, maxOutputRunes)
+	return out, nil
+}
+
+const maxRenderResponseBytes = 50 << 20
+
+type PDFPageImage struct {
+	Page int    `json:"page"`
+	MIME string `json:"mime"`
+	Data string `json:"data"`
+}
+
+type PDFRenderResult struct {
+	TotalPages int            `json:"total_pages"`
+	Images     []PDFPageImage `json:"images"`
+}
+
+func (c *Client) RenderPDF(ctx context.Context, path string, pages []int) (PDFRenderResult, error) {
+	buf, err := json.Marshal(map[string]any{"path": path, "pages": pages})
+	if err != nil {
+		return PDFRenderResult{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/render-pdf", bytes.NewReader(buf))
+	if err != nil {
+		return PDFRenderResult{}, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return PDFRenderResult{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+		return PDFRenderResult{}, fmt.Errorf("沙箱返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRenderResponseBytes+1))
+	if err != nil {
+		return PDFRenderResult{}, err
+	}
+	if len(body) > maxRenderResponseBytes {
+		return PDFRenderResult{}, fmt.Errorf("PDF 渲染结果超过 %dMB", maxRenderResponseBytes>>20)
+	}
+	var out PDFRenderResult
+	if err := json.Unmarshal(body, &out); err != nil {
+		return PDFRenderResult{}, fmt.Errorf("解析 PDF 渲染响应失败: %w", err)
+	}
+	if out.TotalPages < 1 || len(out.Images) == 0 || len(out.Images) > 5 {
+		return PDFRenderResult{}, fmt.Errorf("PDF 渲染响应里的页数无效")
+	}
+	for _, img := range out.Images {
+		if img.Page < 1 || img.Page > out.TotalPages || img.MIME != "image/jpeg" || img.Data == "" {
+			return PDFRenderResult{}, fmt.Errorf("PDF 渲染响应里有无效图片")
+		}
+	}
 	return out, nil
 }
 
@@ -137,7 +191,7 @@ func ToolDef() llm.Tool {
 	var t llm.Tool
 	t.Type = "function"
 	t.Function.Name = ToolName
-	t.Function.Description = "在沙箱里执行 Python 代码并返回 stdout/stderr/退出码。环境：无网络，预装 numpy/matplotlib/pypdf/python-docx/openpyxl/chardet；用户上传的文件在 /files/（只读），/tmp 可写但易失。每次调用是独立进程、变量不保留，请写自包含代码。适合：精确计算、数据处理、读取上传的文档、验证猜想。单次限时 20 秒。结果用 print 输出。"
+	t.Function.Description = "在沙箱里执行 Python 代码并返回 stdout/stderr/退出码。环境：无网络，预装 numpy/matplotlib/sympy/pypdf/pymupdf/python-docx/openpyxl/chardet；用户上传的文件在 /files/（只读），/tmp 可写但易失。每次调用是独立进程、变量不保留，请写自包含代码。适合：精确计算、数据处理、读取上传的文档、验证猜想。单次限时 20 秒。结果用 print 输出。"
 	t.Function.Parameters = map[string]any{
 		"type": "object",
 		"properties": map[string]any{

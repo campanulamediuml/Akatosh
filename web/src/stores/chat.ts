@@ -233,7 +233,8 @@ export const useChatStore = defineStore('chat', {
      * 会话上下文占用：{ used, total, estimated }。
      * - total 来自会话当前模型的 context_len（没声明则为 0，界面不显示）；
      * - 压缩后先用后端保存的估算值，让页面立即反映上下文缩小；
-     * - 下一轮拿到上游 prompt_tokens 后估算值清零，恢复显示实测值。
+     * - 下一轮拿到上游 prompt_tokens 后估算值清零，恢复显示实测值；
+     * - 工具循环的 message.usage 是多段请求的成本总和，上下文只看最后一段。
      */
     contextUsage(): { used: number; total: number; estimated: boolean } | null {
       const conv = this.conv
@@ -247,7 +248,11 @@ export const useChatStore = defineStore('chat', {
       const last = [...this.messages]
         .reverse()
         .find((x) => x.role === 'assistant' && x.status !== 'streaming' && (x.usage?.prompt_tokens ?? 0) > 0)
-      return { used: last?.usage.prompt_tokens ?? 0, total, estimated: false }
+      const segments = last?.seg_usages ?? []
+      const used = segments.length > 0
+        ? segments[segments.length - 1].prompt_tokens
+        : last?.usage.prompt_tokens ?? 0
+      return { used, total, estimated: false }
     },
   },
 

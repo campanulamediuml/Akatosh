@@ -17,9 +17,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 TIMEOUT_S = 20          # 单次执行硬超时，到点强杀（文档提取类任务放宽到 20s）
 MAX_CODE_BYTES = 1 << 20   # 代码最大 1MB
 MAX_OUTPUT = 64 * 1024     # stdout/stderr 各截到 64KB（防刷屏占内存）
+MAX_RENDER_OUTPUT = 48 * 1024 * 1024
+MAX_RENDER_PAGES = 5
 
 
-def run_code(code: str) -> dict:
+def run_code(code: str, max_output=MAX_OUTPUT) -> dict:
     start = time.monotonic()
     try:
         p = subprocess.run(
@@ -30,14 +32,14 @@ def run_code(code: str) -> dict:
             env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/tmp"},
         )
         out = {
-            "stdout": p.stdout[-MAX_OUTPUT:],
+            "stdout": p.stdout[-max_output:],
             "stderr": p.stderr[-MAX_OUTPUT:],
             "exit_code": p.returncode,
             "timed_out": False,
         }
     except subprocess.TimeoutExpired as e:
         out = {
-            "stdout": e.stdout[-MAX_OUTPUT:] if isinstance(e.stdout, str) else "",
+            "stdout": e.stdout[-max_output:] if isinstance(e.stdout, str) else "",
             "stderr": f"（执行超过 {TIMEOUT_S}s，已强杀）",
             "exit_code": -1,
             "timed_out": True,
@@ -46,8 +48,50 @@ def run_code(code: str) -> dict:
     return out
 
 
+def render_pdf(path, pages):
+    if not isinstance(path, str) or not path.startswith("/files/") or ".." in path:
+        return 400, {"error": "PDF 路径无效"}
+    if (not isinstance(pages, list) or not 1 <= len(pages) <= MAX_RENDER_PAGES
+            or any(type(p) is not int or p < 1 for p in pages)
+            or len(set(pages)) != len(pages)):
+        return 400, {"error": f"pages 必须是 1~{MAX_RENDER_PAGES} 个不重复的正整数页码"}
+    code = f"""import base64
+import json
+import fitz
+path = {json.dumps(path)}
+pages = {json.dumps(pages)}
+doc = fitz.open(path)
+total = doc.page_count
+if any(p > total for p in pages):
+    raise ValueError(f"页码超出范围（共 {{total}} 页）")
+images = []
+for number in pages:
+    pix = doc.load_page(number - 1).get_pixmap(dpi=160, alpha=False)
+    data = pix.tobytes("jpeg", jpg_quality=85)
+    images.append({{"page": number, "mime": "image/jpeg", "data": base64.b64encode(data).decode("ascii")}})
+print(json.dumps({{"total_pages": total, "images": images}}))
+"""
+    result = run_code(code, MAX_RENDER_OUTPUT)
+    if result["timed_out"]:
+        return 504, {"error": result["stderr"]}
+    if result["exit_code"] != 0:
+        return 400, {"error": result["stderr"].strip() or "PDF 渲染失败"}
+    try:
+        return 200, json.loads(result["stdout"])
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return 500, {"error": "PDF 渲染结果无效或超过响应大小限制"}
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
+        if self.path == "/render-pdf":
+            try:
+                n = min(int(self.headers.get("Content-Length") or 0), 64 * 1024)
+                body = json.loads(self.rfile.read(n))
+            except Exception as e:
+                return self._json(400, {"error": f"请求体不是合法 JSON: {e}"})
+            status, out = render_pdf(body.get("path"), body.get("pages"))
+            return self._json(status, out)
         if self.path != "/run":
             self.send_error(404)
             return

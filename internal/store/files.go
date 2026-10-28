@@ -6,8 +6,8 @@ import (
 )
 
 // File 是一个上传的文档。原始二进制存在 misc/files/<hash><ext>（内容哈希去重），
-// 文本提取按需进行——read_file 工具调 pybox 沙箱现解（pypdf/docx/openpyxl/chardet），
-// Go 不碰任何格式解析。
+// 内容按需读取——read_file 工具调 pybox 沙箱现解文本（pypdf/docx/openpyxl/chardet），
+// PDF 指定页也可用 pymupdf 渲染成图片；Go 不碰任何格式解析。
 type File struct {
 	ID int64 `json:"id"`
 	// UserID 首个上传者（同 attachments 的哈希去重语义）

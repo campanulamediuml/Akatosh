@@ -102,7 +102,21 @@ func formatToolLogSummary(logJSON string) string {
 		case "file":
 			name, _ := r["name"].(string)
 			if name != "" {
-				bits = append(bits, fmt.Sprintf("读取了文件「%s」", name))
+				action := "读取了"
+				if images, _ := r["images"].(bool); images {
+					action = "按图片读取了"
+				}
+				bit := fmt.Sprintf("%s文件「%s」", action, name)
+				if pages, ok := r["pages"].([]any); ok && len(pages) > 0 {
+					numbers := make([]string, 0, len(pages))
+					for _, page := range pages {
+						if n, ok := page.(float64); ok {
+							numbers = append(numbers, fmt.Sprintf("%.0f", n))
+						}
+					}
+					bit += "（第 " + strings.Join(numbers, "、") + " 页）"
+				}
+				bits = append(bits, bit)
 			}
 			// image 条目不进文本摘要：它们由 imageToolRounds 重放成结构化工具轮
 		}
@@ -351,19 +365,67 @@ func supportsImageToolReceipt(modelID string) bool {
 		strings.HasPrefix(m, "k2") || strings.HasPrefix(m, "k3")
 }
 
+const maxReadFilePages = 5
+
+type readFileArgs struct {
+	ID     int64 `json:"id"`
+	Pages  []int `json:"pages"`
+	Images bool  `json:"images"`
+}
+
+func parseReadFileArgs(arguments string) (readFileArgs, error) {
+	var args readFileArgs
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		if id := parseAttachmentID(arguments); id > 0 {
+			return readFileArgs{ID: id}, nil
+		}
+		return readFileArgs{}, fmt.Errorf("参数不是合法 JSON")
+	}
+	if args.ID <= 0 {
+		return readFileArgs{}, fmt.Errorf("缺少有效的文件 id")
+	}
+	if len(args.Pages) > maxReadFilePages {
+		return readFileArgs{}, fmt.Errorf("每次最多读取 %d 页", maxReadFilePages)
+	}
+	seen := map[int]bool{}
+	for _, page := range args.Pages {
+		if page < 1 {
+			return readFileArgs{}, fmt.Errorf("页码必须从 1 开始")
+		}
+		if seen[page] {
+			return readFileArgs{}, fmt.Errorf("页码不能重复")
+		}
+		seen[page] = true
+	}
+	if args.Images && len(args.Pages) == 0 {
+		return readFileArgs{}, fmt.Errorf("按图片读取 PDF 时必须指定 pages")
+	}
+	return args, nil
+}
+
 // readFileToolDef 是 read_file 的工具声明：模型用它读用户上传的文档，
-// 提取工作由 pybox 沙箱完成（Go 不碰格式解析）。
+// 提取和 PDF 页面渲染由 pybox 沙箱完成（Go 不碰格式解析）。
 func readFileToolDef() llm.Tool {
 	var t llm.Tool
 	t.Type = "function"
 	t.Function.Name = readFileToolName
-	t.Function.Description = "读取本会话里用户上传的文档内容。支持 txt/md/csv/json/代码（py/js/go 等）/PDF/DOCX/XLSX。参数 id 来自消息里的 [文件#N] 标注。"
+	t.Function.Description = "读取本会话里用户上传的文档内容。支持 txt/md/csv/json/代码（py/js/go 等）/PDF/DOCX/XLSX。参数 id 来自消息里的 [文件#N] 标注。PDF 默认提取文本并返回总页数；扫描件或需要看版面时，设 images=true 并用 pages 指定要看的页（从 1 开始，每次最多 5 页），页面会以图片返回。可分批读取后续页。"
 	t.Function.Parameters = map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"id": map[string]any{
 				"type":        "integer",
 				"description": "文件 id（消息里的 [文件#N] 标注）",
+			},
+			"pages": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "integer", "minimum": 1},
+				"maxItems":    maxReadFilePages,
+				"description": "可选 PDF 页码，从 1 开始；文本模式按页提取，图片模式必填",
+			},
+			"images": map[string]any{
+				"type":        "boolean",
+				"description": "PDF 专用：true 时将 pages 指定的页面渲染成图片，适用于扫描件、表格和复杂版面",
 			},
 		},
 		"required": []string{"id"},
@@ -373,9 +435,14 @@ func readFileToolDef() llm.Tool {
 
 // fileExtractScript 生成发给 pybox 的提取脚本：按扩展名分发，
 // pypdf / python-docx / openpyxl / chardet 已在沙箱预装（Dockerfile.pybox）。
-func fileExtractScript(path string) string {
+func fileExtractScript(path string, pages []int) string {
+	pagesJSON, _ := json.Marshal(pages)
+	if pages == nil {
+		pagesJSON = []byte("None")
+	}
 	return `import sys
 path = ` + pyQuote(path) + `
+selected_pages = ` + string(pagesJSON) + `
 ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
 TEXT_EXT = {"txt","md","markdown","log","csv","json","jsonl","xml","yaml","yml","toml","ini","sql","html","css",
             "py","js","ts","go","java","c","h","cpp","rs","sh"}
@@ -387,9 +454,19 @@ try:
     elif ext == "pdf":
         from pypdf import PdfReader
         r = PdfReader(path)
+        total = len(r.pages)
+        print(f"PDF 共 {total} 页。扫描件或需要看版面时，用 images=true 和 pages 指定页码。")
+        if selected_pages is not None and any(p > total for p in selected_pages):
+            raise ValueError(f"页码超出范围（共 {total} 页）")
         for i, p in enumerate(r.pages, 1):
+            if selected_pages is not None and i not in selected_pages:
+                continue
             print(f"--- 第 {i} 页 ---")
-            print(p.extract_text() or "")
+            text = p.extract_text() or ""
+            if text.strip():
+                print(text)
+            else:
+                print("[此页未提取到文本，可能是扫描件；请用 images=true 重新读取此页]")
     elif ext == "docx":
         import docx
         d = docx.Document(path)
