@@ -86,7 +86,7 @@ func (t *Titler) Generate(convID int64, expectedTitle string, cli *llm.Client, m
 		prompt = strings.Replace(prompt,
 			"%s", truncateRunes(strings.TrimSpace(reply), titleSnippet), 1)
 
-		raw, usage, err := cli.Complete(ctx, model, []llm.ChatMessage{{Role: "user", Content: prompt}}, 512, "none")
+		raw, usage, err := cli.Complete(ctx, model, []llm.ChatMessage{{Role: "user", Content: prompt}}, 512, "low")
 		elapsed := time.Since(start)
 		if err != nil {
 			// 失败就保留本地截断的标题，不打扰用户
@@ -94,8 +94,7 @@ func (t *Titler) Generate(convID int64, expectedTitle string, cli *llm.Client, m
 			return
 		}
 		// 起标题也是一次真金白银的上游请求，用量一样打在日志里。
-		// 注意它刻意用 reasoning_effort=none：不需要思考，也就几乎不花 token。
-		log.Printf("[title] 会话 %d 起标题  model=%s  思考强度=none(显式关闭)  用时=%.1fs  "+
+		log.Printf("[title] 会话 %d 起标题  model=%s  思考强度=low  用时=%.1fs  "+
 			"tokens: prompt=%d completion=%d(思考 %d)  缓存: 命中=%d 未命中=%d",
 			convID, model, elapsed.Seconds(),
 			usage.PromptTokens, usage.CompletionTokens, usage.ReasoningTokens,

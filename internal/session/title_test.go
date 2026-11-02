@@ -50,8 +50,9 @@ func titleUpstream(t *testing.T, title string, titleDelay time.Duration) (*httpt
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Stream   bool `json:"stream"`
-			Messages []struct {
+			Stream          bool   `json:"stream"`
+			ReasoningEffort string `json:"reasoning_effort"`
+			Messages        []struct {
 				Role    string `json:"role"`
 				Content string `json:"content"`
 			} `json:"messages"`
@@ -60,6 +61,9 @@ func titleUpstream(t *testing.T, title string, titleDelay time.Duration) (*httpt
 
 		if !body.Stream { // 起标题走这条
 			atomic.AddInt32(&titleCalls, 1)
+			if body.ReasoningEffort != "low" {
+				t.Errorf("起标题的 reasoning_effort = %q，期望 low", body.ReasoningEffort)
+			}
 			if titleDelay > 0 {
 				time.Sleep(titleDelay)
 			}
