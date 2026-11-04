@@ -23,6 +23,7 @@ import type {
   DeltaPayload,
   Generating,
   HelloPayload,
+  MemorySessionStatus,
   Message,
   MessagePayload,
   NoticePayload,
@@ -186,6 +187,8 @@ interface ChatState {
   hasMore: boolean
   /** 正在向上翻页加载更早消息 */
   loadingOlder: boolean
+  memoryStatus: MemorySessionStatus | null
+  memorySaving: boolean
   /**
    * 生成中的联网搜索状态：messageID → 已经发生的搜索动作（「正在搜索：xxx」…）。
    * 这是内存态：回答落地后被清空（持久展示由消息的 search_log 承担）；
@@ -210,6 +213,8 @@ export const useChatStore = defineStore('chat', {
     scrollRequest: 0,
     hasMore: false,
     loadingOlder: false,
+    memoryStatus: null,
+    memorySaving: false,
     searchStatus: {},
     toolArgs: {},
   }),
@@ -395,11 +400,13 @@ export const useChatStore = defineStore('chat', {
         this.conv = null
         this.messages = []
         this.generating = null
+        this.memoryStatus = null
         this.revision++
       }
       this.beginSnapshot()
       try {
         await this.fetchState(id, epoch)
+        await this.fetchMemoryStatus(id, epoch)
         // 打开就算看过了：熄灭侧边栏的小红点
         void useConversationsStore().markRead(id)
       } catch (err) {
@@ -407,6 +414,31 @@ export const useChatStore = defineStore('chat', {
       } finally {
         this.loading = false
         this.endSnapshot()
+      }
+    },
+
+    async fetchMemoryStatus(id: number, epoch = convEpoch): Promise<void> {
+      try {
+        const status = await api.getConversationMemory(id)
+        if (epoch === convEpoch && this.currentConvId() === id) this.memoryStatus = status
+      } catch (err) {
+        if (epoch === convEpoch) toast.error(`读取记忆状态失败：${toError(err).message}`)
+      }
+    },
+
+    async setMemoryEnabled(enabled: boolean): Promise<boolean> {
+      const id = this.conv?.id
+      if (!id || this.memorySaving) return false
+      this.memorySaving = true
+      try {
+        this.memoryStatus = await api.setConversationMemory(id, enabled)
+        toast.info(enabled ? '已开启记忆：每日 04:00 归档，次日生效' : '已关闭记忆：不再读取或归档新内容')
+        return true
+      } catch (err) {
+        toast.error(`记忆设置失败：${toError(err).message}`)
+        return false
+      } finally {
+        this.memorySaving = false
       }
     },
 

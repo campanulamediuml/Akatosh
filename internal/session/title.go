@@ -57,7 +57,7 @@ func NewTitler(st Store, bus *Bus, isGenerating func(int64) bool) *Titler {
 //
 // expectedTitle 是「此刻的标题」（本地截断出来的那个）。请求回来时如果标题已经
 // 不是它了，说明用户手动改过名，直接放弃覆盖。
-func (t *Titler) Generate(convID int64, expectedTitle string, cli *llm.Client, model, userMsg, reply string) {
+func (t *Titler) Generate(convID int64, expectedTitle string, cli *llm.Client, model, effort, userMsg, reply string) {
 	if cli == nil || model == "" || strings.TrimSpace(userMsg) == "" {
 		return
 	}
@@ -86,7 +86,7 @@ func (t *Titler) Generate(convID int64, expectedTitle string, cli *llm.Client, m
 		prompt = strings.Replace(prompt,
 			"%s", truncateRunes(strings.TrimSpace(reply), titleSnippet), 1)
 
-		raw, usage, err := cli.Complete(ctx, model, []llm.ChatMessage{{Role: "user", Content: prompt}}, 512, "low")
+		raw, usage, err := cli.Complete(ctx, model, []llm.ChatMessage{{Role: "user", Content: prompt}}, 512, effort)
 		elapsed := time.Since(start)
 		if err != nil {
 			// 失败就保留本地截断的标题，不打扰用户
@@ -94,9 +94,9 @@ func (t *Titler) Generate(convID int64, expectedTitle string, cli *llm.Client, m
 			return
 		}
 		// 起标题也是一次真金白银的上游请求，用量一样打在日志里。
-		log.Printf("[title] 会话 %d 起标题  model=%s  思考强度=low  用时=%.1fs  "+
+		log.Printf("[title] 会话 %d 起标题  model=%s  思考强度=%s  用时=%.1fs  "+
 			"tokens: prompt=%d completion=%d(思考 %d)  缓存: 命中=%d 未命中=%d",
-			convID, model, elapsed.Seconds(),
+			convID, model, effortLabel(effort), elapsed.Seconds(),
 			usage.PromptTokens, usage.CompletionTokens, usage.ReasoningTokens,
 			usage.CacheHitTokens, usage.CacheMissTokens)
 

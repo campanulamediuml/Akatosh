@@ -328,7 +328,7 @@ func parseStream(ctx context.Context, body io.ReadCloser, out chan<- Event) {
 const ampleTokens = 2048
 
 // Complete 发一次**非流式**请求，返回正文与用量，给起标题、上下文压缩这类任务用。
-// effort 为空调用方不下发 reasoning_effort；起标题传 low，压缩传会话的思考强度。
+// effort 为空调用方不下发 reasoning_effort；起标题和记忆使用后台任务配置（默认 low），压缩传会话的思考强度。
 //
 // 这里兜住了两个实测出来的坑：
 //

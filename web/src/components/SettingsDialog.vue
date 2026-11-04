@@ -252,6 +252,31 @@ const effortHint = computed(() => {
   return '「默认」表示不下发 reasoning_effort 参数，用上游自己的默认行为。'
 })
 
+const backgroundCfg = computed(() => settings.memorySettings?.background ?? { provider_id: 0, model_id: '', effort: 'low' })
+const backgroundProviderModels = computed(() => settings.modelsOf(backgroundCfg.value.provider_id))
+const backgroundModel = computed(() => settings.modelIn(backgroundCfg.value.provider_id, backgroundCfg.value.model_id))
+const backgroundEfforts = computed(() => backgroundModel.value?.efforts ?? [])
+
+async function saveBackground(patch: { provider_id?: number; model_id?: string; effort?: string }): Promise<void> {
+  const res = await settings.saveMemorySettings({ ...backgroundCfg.value, ...patch })
+  if (!res.ok) controlsEpoch.value += 1
+}
+
+async function onBackgroundProvider(e: Event): Promise<void> {
+  await saveBackground({ provider_id: Number((e.target as HTMLSelectElement).value), model_id: '', effort: 'low' })
+}
+
+async function onBackgroundModel(e: Event): Promise<void> {
+  const modelID = (e.target as HTMLSelectElement).value
+  const model = settings.modelIn(backgroundCfg.value.provider_id, modelID)
+  const effort = model?.efforts.includes('low') ? 'low' : ''
+  await saveBackground({ model_id: modelID, effort })
+}
+
+async function onBackgroundEffort(e: Event): Promise<void> {
+  await saveBackground({ effort: (e.target as HTMLSelectElement).value })
+}
+
 /* ------------------------------------------------------------------ */
 /* 用户管理（仅管理员可见）                                              */
 /* ------------------------------------------------------------------ */
@@ -694,6 +719,63 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onDocKeydown))
               <div class="hint">新建会话时自动带上；已有会话不受影响（会话级的在侧栏「⋯」菜单里改）。</div>
             </div>
           </template>
+        </section>
+
+        <section class="fieldset">
+          <div class="fieldset__legend">后台任务与记忆</div>
+          <p class="hint" style="margin: 0 0 12px">
+            起标题和记忆归档统一使用这里的供应商、模型与思考等级；留空则跟随当前 Session。记忆每天 04:00 整理，次日生效。
+          </p>
+          <div class="field__row">
+            <div class="field">
+              <label class="label" for="background-provider">后台供应商</label>
+              <select
+                id="background-provider"
+                class="select select--sm"
+                :key="`bg-p-${controlsEpoch}`"
+                :value="backgroundCfg.provider_id"
+                :disabled="settings.savingMemorySettings"
+                @change="onBackgroundProvider"
+              >
+                <option :value="0">跟随当前 Session</option>
+                <option v-for="p in settings.providers" :key="p.id" :value="p.id">
+                  {{ settings.providerName(p.id) }}（{{ p.model_count }} 个模型）
+                </option>
+              </select>
+            </div>
+            <div class="field">
+              <label class="label" for="background-model">后台模型 ID</label>
+              <select
+                id="background-model"
+                class="select select--sm"
+                :key="`bg-m-${controlsEpoch}`"
+                :value="backgroundCfg.model_id"
+                :disabled="!backgroundProviderModels.length || settings.savingMemorySettings"
+                @change="onBackgroundModel"
+              >
+                <option value="">（未选择）</option>
+                <option v-for="m in backgroundProviderModels" :key="m.id" :value="m.model_id">{{ m.model_id }}</option>
+              </select>
+            </div>
+          </div>
+          <div class="field">
+            <label class="label" for="background-effort">后台思考等级</label>
+            <select
+              id="background-effort"
+              class="select select--sm"
+              :key="`bg-e-${controlsEpoch}`"
+              :value="backgroundCfg.effort"
+              :disabled="!backgroundEfforts.length || settings.savingMemorySettings"
+              @change="onBackgroundEffort"
+            >
+              <option value="">默认（不发参数）</option>
+              <option v-for="e in backgroundEfforts" :key="e" :value="e">{{ effortText(e) }}（{{ e }}）</option>
+            </select>
+            <div class="hint">未单独配置时，起标题和记忆归档默认使用 low。</div>
+          </div>
+          <div v-if="settings.memorySettings?.maintenance.last_report" class="hint">
+            最近维护：{{ settings.memorySettings.maintenance.last_report }}
+          </div>
         </section>
 
         <!-- 用户管理：仅管理员可见。每个用户一个令牌，数据（供应商/会话/附件）完全隔离 -->

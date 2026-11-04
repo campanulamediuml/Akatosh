@@ -12,6 +12,7 @@ import type {
   ApiErrorBody,
   ApiErrorCode,
   Attachment,
+  BackgroundModelSettings,
   Conversation,
   CreateConversationInput,
   CreateProviderInput,
@@ -19,6 +20,8 @@ import type {
   EditMessageInput,
   Health,
   Me,
+  MemorySessionStatus,
+  MemorySettingsResponse,
   Message,
   Model,
   Provider,
@@ -398,6 +401,13 @@ export const api = {
   /** 新建会话的默认值（供应商 / 模型 / 思考强度）；字段省略 = 不改，空串或 0 = 清空 */
   updateDefaults: (input: DefaultsInput, options?: RequestOptions) =>
     http.put<SettingsResponse>('/api/settings/defaults', input, options),
+  getMemorySettings: (options?: RequestOptions) => http.get<MemorySettingsResponse>('/api/memory/settings', options),
+  updateMemorySettings: (input: BackgroundModelSettings, options?: RequestOptions) =>
+    http.put<MemorySettingsResponse>('/api/memory/settings', input, options),
+  getConversationMemory: (id: number, options?: RequestOptions) =>
+    http.get<MemorySessionStatus>(`/api/conversations/${id}/memory`, options),
+  setConversationMemory: (id: number, enabled: boolean, options?: RequestOptions) =>
+    http.put<MemorySessionStatus>(`/api/conversations/${id}/memory`, { enabled }, options),
 
   /* ---- 供应商 CRUD（可以配任意多家） ---- */
   listProviders: (options?: RequestOptions) => http.get<Provider[]>('/api/providers', options),

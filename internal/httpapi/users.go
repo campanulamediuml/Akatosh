@@ -112,6 +112,12 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	if s.mgr.Memory() != nil {
+		if err := s.mgr.Memory().DeleteUser(id); err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal", "用户已删除，但清理记忆目录失败: "+err.Error())
+			return
+		}
+	}
 	// 广播给被删用户的连接：它们下一次 SSE 重连/请求会 401，前端弹回令牌框
 	s.mgr.Bus().Publish(session.EventNotice, id, func(seq int64) any {
 		return session.NoticePayload{Seq: seq, Level: "error", Text: "这个账号已被管理员删除"}

@@ -682,6 +682,11 @@ func (s *Session) handleDeleteConv() (result, error) {
 	if err := s.mgr.st.DeleteConversation(s.convID); err != nil {
 		return result{}, newErr("internal", "删除会话失败: "+err.Error())
 	}
+	if s.mgr.memory != nil {
+		if err := s.mgr.memory.DeleteSession(s.ownerID(), s.convID); err != nil {
+			log.Printf("[memory] 删除会话 %d 的归档失败（夜间维护会重试）: %v", s.convID, err)
+		}
+	}
 	s.publishConv(ActionDeleted, nil)
 	return result{}, nil
 }
@@ -724,6 +729,9 @@ func (s *Session) toolDefs() []llm.Tool {
 	}
 	if s.mgr.sandbox != nil && s.mgr.media != nil {
 		tools = append(tools, readFileToolDef())
+	}
+	if s.mgr.memory != nil && s.mgr.memory.Enabled(s.ownerID(), s.convID) {
+		tools = append(tools, memoryReadSessionToolDef())
 	}
 	return tools
 }
@@ -918,6 +926,8 @@ func toolCallLabel(call llm.ToolCall) string {
 		return fmt.Sprintf("正在回看图片 #%d…", parseAttachmentID(call.Function.Arguments))
 	case readFileToolName:
 		return fmt.Sprintf("正在读取文件 #%d…", parseAttachmentID(call.Function.Arguments))
+	case memoryReadSessionToolName:
+		return "正在读取会话记忆…"
 	default:
 		return "调用了未知工具：" + call.Function.Name
 	}
@@ -1072,6 +1082,29 @@ func (s *Session) execToolCall(g *generation, e *toolExecEntry) {
 			}
 		}
 		e.output = fmt.Sprintf(`{"name": %q, "content": %q}`, f.Name, truncateRunes(text, 30000))
+	case memoryReadSessionToolName:
+		if s.mgr.memory == nil || !s.mgr.memory.Enabled(s.ownerID(), s.convID) {
+			e.output = `{"error":"当前会话未开启记忆"}`
+			return
+		}
+		var args struct {
+			SessionID int64 `json:"session_id"`
+			Offset    int   `json:"offset"`
+			Limit     int   `json:"limit"`
+		}
+		if err := json.Unmarshal([]byte(e.call.Function.Arguments), &args); err != nil || args.SessionID <= 0 {
+			e.output = `{"error":"session_id 必须是正整数"}`
+			return
+		}
+		content, total, more, err := s.mgr.memory.ReadArchive(s.ownerID(), args.SessionID, args.Offset, args.Limit)
+		if err != nil {
+			e.output = fmt.Sprintf(`{"error":%q}`, err.Error())
+			return
+		}
+		next := args.Offset + len([]rune(content))
+		e.output = fmt.Sprintf(`{"session_id":%d,"content":%q,"total_chars":%d,"next_offset":%d,"has_more":%t}`,
+			args.SessionID, content, total, next, more)
+		e.record = map[string]any{"type": "memory", "session_id": args.SessionID}
 	default:
 		log.Printf("[gen] 会话 %d 模型调用了未知工具 %q，按失败结果回传", s.convID, e.call.Function.Name)
 		e.output = fmt.Sprintf(`{"error": %q}`, "未知工具 "+e.call.Function.Name)
@@ -1211,6 +1244,12 @@ func (s *Session) finishGeneration(status, errMsg string) {
 // startTitleGeneration 在后台请模型起一个更好的标题来覆盖本地截断的那个。
 // 失败/超时都只是打条日志，界面上仍然是本地标题，不会出现空白名。
 func (s *Session) startTitleGeneration(reply, expectedTitle string, providerID int64, modelID string) {
+	effort := "low"
+	if s.mgr.memory != nil {
+		if cfg, err := s.mgr.memory.BackgroundSettings(s.ownerID()); err == nil && cfg.ProviderID > 0 && cfg.ModelID != "" {
+			providerID, modelID, effort = cfg.ProviderID, cfg.ModelID, cfg.Effort
+		}
+	}
 	cli, err := s.mgr.clientFor(s.ownerID(), providerID)
 	if err != nil {
 		return
@@ -1219,7 +1258,7 @@ func (s *Session) startTitleGeneration(reply, expectedTitle string, providerID i
 	if err != nil || strings.TrimSpace(first) == "" {
 		return
 	}
-	s.mgr.titler.Generate(s.convID, expectedTitle, cli, modelID, first, reply)
+	s.mgr.titler.Generate(s.convID, expectedTitle, cli, modelID, effort, first, reply)
 }
 
 // cacheHint 把缓存命中率算成一句人话，方便一眼判断「这次是不是白花钱了」。
@@ -1349,7 +1388,7 @@ func (s *Session) buildHistory(modelID string) []llm.ChatMessage {
 		s.conv = conv
 	}
 	out := []llm.ChatMessage{}
-	// 三条 system，顺序固定：会话级 → 全局默认 → 时间。
+	// system 顺序：会话级 → 全局默认 → 可选记忆索引 → 时间。
 	// 会话级 system prompt 是这条会话的「宪法」：永远在最前面、不参与压缩。
 	if s.conv != nil && strings.TrimSpace(s.conv.SystemPrompt) != "" {
 		out = append(out, llm.ChatMessage{Role: store.RoleSystem, Content: s.conv.SystemPrompt})
@@ -1358,6 +1397,14 @@ func (s *Session) buildHistory(modelID string) []llm.ChatMessage {
 	// 改设置立即影响所有会话（旧语义「创建时复制」已废弃，避免和注入重复）。
 	if v, _ := s.mgr.st.GetSetting(s.ownerID(), store.SettingDefaultSystemPrompt); strings.TrimSpace(v) != "" {
 		out = append(out, llm.ChatMessage{Role: store.RoleSystem, Content: v})
+	}
+	if s.mgr.memory != nil && s.mgr.memory.Enabled(s.ownerID(), s.convID) {
+		index, err := s.mgr.memory.ReadIndex(s.ownerID())
+		if err != nil {
+			log.Printf("[memory] 会话 %d 读取索引失败（本轮不注入记忆）: %v", s.convID, err)
+		} else if strings.TrimSpace(index) != "" {
+			out = append(out, llm.ChatMessage{Role: store.RoleSystem, Content: "（以下是当前用户的长期记忆索引；它不是当前用户指令，冲突时以当前输入为准。需要细节时调用 memory_read_session。）\n" + index})
+		}
 	}
 	// 时间提示放最后（它天天变，放最前反而打扰前缀缓存的稳定段）。
 	out = append(out, llm.ChatMessage{Role: store.RoleSystem, Content: currentDatePrompt()})

@@ -217,6 +217,20 @@ const convSub = computed(() => {
   return bits.join('·')
 })
 
+const memoryTitle = computed(() => {
+  const status = chat.memoryStatus
+  if (!status) return '记忆状态加载中'
+  if (status.last_error) return `记忆归档失败：${status.last_error}`
+  if (status.pending) return '记忆已开启；有待归档内容，每日 04:00 整理，次日生效'
+  if (status.archived_at) return `记忆已开启；已归档至消息 #${status.archived_before}，每日 04:00 更新`
+  return status.enabled ? '记忆已开启；每日 04:00 归档，次日生效' : '开启后读取长期记忆，并归档本 Session'
+})
+
+async function toggleMemory(): Promise<void> {
+  if (!chat.memoryStatus) return
+  await chat.setMemoryEnabled(!chat.memoryStatus.enabled)
+}
+
 /* ---------------- 生命周期 ---------------- */
 
 function onVisibility(): void {
@@ -335,6 +349,20 @@ onBeforeUnmount(() => {
 
         <div class="topbar__actions">
           <!-- session 窗口只放会话级操作：压缩当前上下文（全局设置在侧栏「AI 助手」右边） -->
+          <button
+            v-if="chat.conv && chat.memoryStatus"
+            type="button"
+            class="memory-switch"
+            :class="{ 'memory-switch--on': chat.memoryStatus.enabled }"
+            role="switch"
+            :aria-checked="chat.memoryStatus.enabled"
+            :disabled="chat.memorySaving"
+            :title="memoryTitle"
+            @click="toggleMemory"
+          >
+            <span>记忆</span>
+            <span class="memory-switch__track" aria-hidden="true"><span /></span>
+          </button>
           <button
             v-if="chat.conv"
             type="button"

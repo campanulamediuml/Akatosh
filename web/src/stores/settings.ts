@@ -17,9 +17,11 @@
 import { defineStore } from 'pinia'
 import { api, toError } from '@/api/client'
 import type {
+  BackgroundModelSettings,
   CreateProviderInput,
   DefaultsInput,
   Me,
+  MemorySettingsResponse,
   Model,
   Provider,
   ProviderTestResponse,
@@ -71,6 +73,8 @@ interface SettingsState {
   /** 正在删除的供应商 id */
   deletingId: number | null
   savingDefaults: boolean
+  memorySettings: MemorySettingsResponse | null
+  savingMemorySettings: boolean
 
   /** 正在「获取模型列表」的供应商 id */
   fetchingIds: number[]
@@ -107,6 +111,8 @@ export const useSettingsStore = defineStore('settings', {
     savingProvider: false,
     deletingId: null,
     savingDefaults: false,
+    memorySettings: null,
+    savingMemorySettings: false,
     fetchingIds: [],
     testingIds: [],
     fetchResults: {},
@@ -215,10 +221,34 @@ export const useSettingsStore = defineStore('settings', {
       if (this.loading) return
       this.loading = true
       try {
-        await Promise.all([this.loadMe(), this.loadSettings(), this.loadModels()])
+        await Promise.all([this.loadMe(), this.loadSettings(), this.loadModels(), this.loadMemorySettings()])
       } finally {
         this.loading = false
         this.loaded = true
+      }
+    },
+
+    async loadMemorySettings(): Promise<void> {
+      try {
+        this.memorySettings = await api.getMemorySettings()
+      } catch (err) {
+        toast.error(`读取后台任务设置失败：${toError(err).message}`)
+      }
+    },
+
+    async saveMemorySettings(input: BackgroundModelSettings): Promise<SaveResult> {
+      if (this.savingMemorySettings) return { ok: false, message: '正在保存' }
+      this.savingMemorySettings = true
+      try {
+        this.memorySettings = await api.updateMemorySettings(input)
+        toast.info('后台任务模型已保存')
+        return { ok: true, message: '已保存' }
+      } catch (err) {
+        const message = toError(err).message
+        toast.error(`保存后台任务模型失败：${message}`)
+        return { ok: false, message }
+      } finally {
+        this.savingMemorySettings = false
       }
     },
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 工具调用展示（联网搜索 / Python 执行 / 生图 / 读文件）。
+ * 工具调用展示（联网搜索 / Python 执行 / 生图 / 读文件 / 读取记忆）。
  *
  * 两种状态：
  * - 生成中（live 非空）：一个实时块，显示「正在搜索：xxx」「正在执行 Python…」
@@ -47,7 +47,12 @@ interface FileEntry {
   error?: string
 }
 
-type ToolEntry = SearchEntry | PythonEntry | ImageEntry | FileEntry
+interface MemoryEntry {
+  type?: string // 'memory'
+  session_id: number
+}
+
+type ToolEntry = SearchEntry | PythonEntry | ImageEntry | FileEntry | MemoryEntry
 
 const props = withDefaults(
   defineProps<{
@@ -85,10 +90,14 @@ function isFile(e: ToolEntry): e is FileEntry {
   return e.type === 'file'
 }
 
+function isMemory(e: ToolEntry): e is MemoryEntry {
+  return e.type === 'memory'
+}
+
 function iconOf(e: ToolEntry): string {
   if (isImage(e)) return '#i-image'
   if (isPython(e)) return '#i-code'
-  if (isFile(e)) return '#i-doc'
+  if (isFile(e) || isMemory(e)) return '#i-doc'
   return '#i-globe'
 }
 
@@ -96,6 +105,7 @@ function labelOf(e: ToolEntry): string {
   if (isImage(e)) return '生成了一张图'
   if (isPython(e)) return '执行了 Python'
   if (isFile(e)) return `读取了文件「${e.name}」`
+  if (isMemory(e)) return `读取了 Session #${e.session_id} 的记忆`
   return `搜索了「${(e as SearchEntry).query}」`
 }
 
@@ -204,6 +214,10 @@ function hostOf(url: string): string {
               <pre v-if="e.stderr" class="searchlog__err">{{ e.stderr }}</pre>
               <div v-if="!e.stdout && !e.stderr" class="searchlog__none">（无输出，退出码 {{ e.exit_code ?? 0 }}）</div>
             </template>
+          </template>
+
+          <template v-else-if="isMemory(e)">
+            <div class="searchlog__none">详细归档已发给模型，来源 Session #{{ e.session_id }}</div>
           </template>
 
           <!-- 搜索记录（含无 type 的历史数据） -->

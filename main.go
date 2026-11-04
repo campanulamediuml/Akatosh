@@ -22,6 +22,7 @@ import (
 	"aiassistant/internal/imagegen"
 	"aiassistant/internal/llm"
 	"aiassistant/internal/media"
+	"aiassistant/internal/memory"
 	"aiassistant/internal/sandbox"
 	"aiassistant/internal/search"
 	"aiassistant/internal/session"
@@ -45,6 +46,8 @@ func main() {
 	pyboxFlag := flag.String("pybox", "", "Python 沙箱地址（如 http://pybox:8000）：配置后开启 run_python 代码执行工具；留空禁用")
 	imagegenFlag := flag.String("imagegen", strings.TrimSpace(os.Getenv("IMAGEGEN")), "图像生成：格式 base_url|api_key|model，默认读取 IMAGEGEN 环境变量（model 可省，默认 Tongyi-MAI/Z-Image-Turbo）")
 	compactFlag := flag.Float64("compact-threshold", 0.7, "上下文提示阈值（0~1）：进度条超过这个比例时变红并建议手动压缩（压缩本身是手动触发，见会话窗口右上角按钮；0 = 不提示）")
+	memoryNow := flag.Bool("memory-maintenance-now", false, "只执行一次记忆维护并退出，不启动 HTTP 服务")
+	memoryUser := flag.Int64("memory-user", 0, "记忆维护只处理指定用户 id（0 = 全部用户）")
 	openBrowser := flag.Bool("open", false, "启动后自动打开浏览器")
 	flag.Parse()
 
@@ -76,6 +79,22 @@ func main() {
 	if err != nil {
 		log.Fatalf("初始化附件目录失败: %v", err)
 	}
+	memoryManager, err := memory.NewManager(st, filepath.Join(*miscDir, "memory"))
+	if err != nil {
+		log.Fatalf("初始化记忆目录失败: %v", err)
+	}
+	defer memoryManager.Close()
+	if *memoryNow {
+		failed := 0
+		for _, report := range memoryManager.RunAll(context.Background(), *memoryUser) {
+			log.Printf("[memory] 独立维护报告：%s", report.String())
+			failed += report.Failed
+		}
+		if failed > 0 {
+			log.Fatalf("记忆维护有 %d 项失败", failed)
+		}
+		return
+	}
 
 	// 上一次进程被杀掉时留下的 streaming 消息不可能再继续了，标成已中止
 	if n, err := st.MarkInterrupted(); err != nil {
@@ -96,7 +115,7 @@ func main() {
 			return nil, session.NewError("no_provider", "这家供应商还没填 API 地址")
 		}
 		return llm.New(p.BaseURL, p.APIKey), nil
-	}, mediaStore)
+	}, mediaStore).WithMemory(memoryManager)
 
 	// 联网搜索（function calling）：配了 -searxng 才启用
 	if sx := strings.TrimSpace(*searxngFlag); sx != "" {
@@ -122,6 +141,11 @@ func main() {
 			log.Printf("警告：-imagegen 格式应为 base_url|api_key|model，当前无法解析，图像生成未启用")
 		}
 	}
+	schedulerCtx, stopMemoryScheduler := context.WithCancel(context.Background())
+	defer stopMemoryScheduler()
+	go memoryManager.RunScheduler(schedulerCtx)
+	log.Printf("  长期记忆 : 每天 04:00 归档（按用户独立存储）")
+
 	// 上下文压缩：默认 0.7，0 = 禁用
 	mgr.WithCompactThreshold(*compactFlag)
 	if *compactFlag > 0 && *compactFlag < 1 {

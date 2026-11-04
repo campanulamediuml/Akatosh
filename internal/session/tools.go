@@ -22,6 +22,25 @@ const readAttachmentToolName = "read_attachment"
 // 后端把提取工作丢给 pybox 沙箱（pypdf/python-docx/openpyxl/chardet），Go 不碰格式解析。
 const readFileToolName = "read_file"
 
+const memoryReadSessionToolName = "memory_read_session"
+
+func memoryReadSessionToolDef() llm.Tool {
+	var t llm.Tool
+	t.Type = "function"
+	t.Function.Name = memoryReadSessionToolName
+	t.Function.Description = "读取长期记忆索引中某个已归档会话的详细内容。session_id 来自记忆索引；返回内容过长时可根据 has_more 用 offset 继续读取。"
+	t.Function.Parameters = map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"session_id": map[string]any{"type": "integer", "description": "记忆索引里的 Session 数字 id"},
+			"offset":     map[string]any{"type": "integer", "description": "从第几个字符开始，首次为 0"},
+			"limit":      map[string]any{"type": "integer", "description": "最多返回多少字符，上限 30000"},
+		},
+		"required": []string{"session_id"},
+	}
+	return t
+}
+
 func readAttachmentToolDef() llm.Tool {
 	var t llm.Tool
 	t.Type = "function"
@@ -117,6 +136,10 @@ func formatToolLogSummary(logJSON string) string {
 					bit += "（第 " + strings.Join(numbers, "、") + " 页）"
 				}
 				bits = append(bits, bit)
+			}
+		case "memory":
+			if id, ok := r["session_id"].(float64); ok {
+				bits = append(bits, fmt.Sprintf("读取了会话 #%.0f 的记忆", id))
 			}
 			// image 条目不进文本摘要：它们由 imageToolRounds 重放成结构化工具轮
 		}

@@ -121,6 +121,33 @@ export interface SettingsResponse {
   compact_threshold?: number
 }
 
+export interface MemorySessionStatus {
+  conv_id: number
+  enabled: boolean
+  status: string
+  archived_before: number
+  archived_at: number
+  last_error: string
+  pending: boolean
+}
+
+export interface BackgroundModelSettings {
+  provider_id: number
+  model_id: string
+  effort: string
+}
+
+export interface MemoryMaintenanceStatus {
+  last_successful_at: number
+  last_report: string
+}
+
+export interface MemorySettingsResponse {
+  background: BackgroundModelSettings
+  maintenance: MemoryMaintenanceStatus
+  schedule: string
+}
+
 /** POST /api/providers 请求体 */
 export interface CreateProviderInput {
   name?: string

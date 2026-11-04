@@ -10,6 +10,7 @@ import (
 	"aiassistant/internal/imagegen"
 	"aiassistant/internal/llm"
 	"aiassistant/internal/media"
+	"aiassistant/internal/memory"
 	"aiassistant/internal/sandbox"
 	"aiassistant/internal/search"
 	"aiassistant/internal/store"
@@ -132,6 +133,8 @@ type Manager struct {
 	titler   *Titler
 	// media 是 misc 目录的句柄（图片读写给后端用）；可以为 nil（不带图也能跑）
 	media *media.Store
+	// memory 是每用户独立 sidecar；nil = 不启用记忆功能。
+	memory *memory.Manager
 	// search 是联网搜索的执行端；nil = 不启用联网搜索（会话上的开关不生效）
 	search *search.Client
 	// sandbox 是 Python 代码执行的执行端；nil = 不启用（会话上的开关不生效）
@@ -164,6 +167,13 @@ func NewManagerWithMedia(st Store, bus *Bus, cf ClientFactory, mediaStore *media
 	m.titler = NewTitler(st, bus, m.ActiveByConv)
 	return m
 }
+
+func (m *Manager) WithMemory(v *memory.Manager) *Manager {
+	m.memory = v
+	return m
+}
+
+func (m *Manager) Memory() *memory.Manager { return m.memory }
 
 // WithSearch 注入联网搜索的执行端（SearXNG）。nil = 这个部署不启用联网搜索。
 func (m *Manager) WithSearch(c *search.Client) *Manager {

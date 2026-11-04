@@ -646,7 +646,31 @@ Model = { "id":3, "provider_id":2, "model_id":"deepseek-reasoner", "display_name
 
 ---
 
-## 7. 前端硬约束
+## 7. 长期记忆（独立 sidecar，多租户隔离）
+
+记忆不修改主库 `ai-assistant.db` 的 schema，也不在 `Conversation` / `State` 中夹带持久化字段。每个用户有独立的 SQLite 和文件树：
+
+```text
+misc/memory/users/<user_id>/
+├── memory.db
+├── index.txt
+├── <yyyy-mm>/index.txt
+├── <yyyy-mm>/session-<conversation_id>.txt
+└── .staging/
+```
+
+- `GET /api/conversations/{id}/memory`：返回 `{conv_id,enabled,status,archived_before,archived_at,last_error,pending}`。
+- `PUT /api/conversations/{id}/memory`，请求 `{enabled:boolean}`：开启后每轮注入本人最新索引、声明 `memory_read_session`，并纳入每日归档；关闭后不再读取或写入新内容，已有归档保留。
+- `GET /api/memory/settings`：返回 `{background:{provider_id,model_id,effort},maintenance,schedule}`。
+- `PUT /api/memory/settings`：请求与 `background` 同形状，用于起标题和记忆归档；`provider_id=0` 或空模型表示跟随当前 Session，默认 effort=low。
+- 每天 04:00（Asia/Shanghai）先由代码清理孤儿、修复索引和缺漏，再对启用且变化的 Session 调用模型。服务启动时补跑最近一次错过的维护。
+- `memory_read_session` 参数为 `{session_id,offset?,limit?}`。后端只接受当前用户清单里的 Session ID，并按字符分段返回；模型不能传文件路径，不能跨用户读取。
+- 删除 Session 同步删除其 sidecar 记录和归档；删除用户清理该用户整个记忆目录。夜间维护是异常清理的兜底。
+- 可执行 `ai-assistant -memory-maintenance-now [-memory-user <id>]` 独立运行一次维护，不启动 HTTP。
+
+---
+
+## 8. 前端硬约束
 
 1. **不要用 `EventSource`**（无法带 header、无法精确控制重连）。用 `fetch()` + `response.body.getReader()` + `TextDecoder` 解 SSE 线格式（按空行切块，`event:` / `data:` 逐行解析，多行 `data` 按 `\n` 拼接，`:` 开头是心跳注释，解析失败只跳过该块）。
 2. **全局只有一条流**。断线要按指数退避重连（1s→2s→4s，上限 15s），重连成功后重新拉当前会话的 `state`。

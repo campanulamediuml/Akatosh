@@ -117,6 +117,10 @@ func (s *Server) routes() {
 	m.HandleFunc("DELETE /api/conversations/{id}", s.handleDeleteConversation)
 	m.HandleFunc("GET /api/conversations/{id}/state", s.handleState)
 	m.HandleFunc("POST /api/conversations/{id}/read", s.handleMarkRead)
+	m.HandleFunc("GET /api/conversations/{id}/memory", s.handleGetConversationMemory)
+	m.HandleFunc("PUT /api/conversations/{id}/memory", s.handlePutConversationMemory)
+	m.HandleFunc("GET /api/memory/settings", s.handleGetMemorySettings)
+	m.HandleFunc("PUT /api/memory/settings", s.handlePutMemorySettings)
 
 	// 命令（返回 ack，内容一律走 SSE）
 	m.HandleFunc("POST /api/conversations/{id}/messages", s.handleSendMessage)

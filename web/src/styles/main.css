@@ -744,6 +744,57 @@ a:hover {
   flex: 0 0 auto;
 }
 
+.memory-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.memory-switch:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.memory-switch--on {
+  color: var(--accent);
+}
+
+.memory-switch__track {
+  position: relative;
+  width: 26px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--border-strong);
+  transition: background 0.15s ease;
+}
+
+.memory-switch__track > span {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--bg-panel);
+  transition: transform 0.15s ease;
+}
+
+.memory-switch--on .memory-switch__track {
+  background: var(--accent);
+}
+
+.memory-switch--on .memory-switch__track > span {
+  transform: translateX(12px);
+}
+
 /* --------------------------------------------------------------------------
    7. 消息列表
    -------------------------------------------------------------------------- */
