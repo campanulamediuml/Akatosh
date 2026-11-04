@@ -15,6 +15,7 @@ import Sidebar from '@/components/Sidebar.vue'
 import MessageList from '@/components/MessageList.vue'
 import Composer from '@/components/Composer.vue'
 import SettingsDialog from '@/components/SettingsDialog.vue'
+import MemoryDialog from '@/components/MemoryDialog.vue'
 import TokenDialog from '@/components/TokenDialog.vue'
 import ToastHost from '@/components/ToastHost.vue'
 import { setUnauthorizedHandler, api, toError } from '@/api/client'
@@ -105,6 +106,7 @@ function readSidebarOpen(): boolean {
 
 const sidebarOpen = ref(readSidebarOpen())
 const settingsOpen = ref(false)
+const memoryOpen = ref(false)
 
 watch(sidebarOpen, (v) => {
   try {
@@ -298,7 +300,7 @@ onBeforeUnmount(() => {
   <div class="app" :class="{ 'app--collapsed': !sidebarOpen }">
     <IconSprite />
 
-    <Sidebar @toggle="sidebarOpen = !sidebarOpen" @open-settings="settingsOpen = true" />
+    <Sidebar @toggle="sidebarOpen = !sidebarOpen" @open-settings="settingsOpen = true" @open-memory="memoryOpen = true" />
 
     <!-- 窄屏抽屉的遮罩：点一下关掉侧栏。桌面端不显示（CSS 里 .app__scrim 默认 display:none） -->
     <div v-if="sidebarOpen" class="app__scrim" @click="sidebarOpen = false" />
@@ -396,6 +398,7 @@ onBeforeUnmount(() => {
     </div>
 
     <SettingsDialog :open="settingsOpen" @close="settingsOpen = false" />
+    <MemoryDialog :open="memoryOpen" @close="memoryOpen = false" />
     <TokenDialog :open="tokenOpen" @close="tokenOpen = false" />
     <ToastHost />
   </div>

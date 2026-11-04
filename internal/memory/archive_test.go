@@ -170,6 +170,14 @@ func TestArchiveLifecycleAndUserIsolation(t *testing.T) {
 	if f.mem.UserRoot(u1) == f.mem.UserRoot(u2) {
 		t.Fatal("两个用户共用了持久化目录")
 	}
+	list1, err := f.mem.ListArchives(u1)
+	if err != nil || len(list1) != 1 || list1[0].ConvID != c1 || list1[0].Title != "用户一的项目" {
+		t.Fatalf("用户一归档列表异常: %+v, %v", list1, err)
+	}
+	list2, err := f.mem.ListArchives(u2)
+	if err != nil || len(list2) != 1 || list2[0].ConvID != c2 {
+		t.Fatalf("用户二归档列表异常: %+v, %v", list2, err)
+	}
 	if _, _, _, err := f.mem.ReadArchive(u1, c2, 0, 100); err == nil {
 		t.Fatal("跨用户读取归档没有被拒绝")
 	}

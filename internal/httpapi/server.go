@@ -121,6 +121,8 @@ func (s *Server) routes() {
 	m.HandleFunc("PUT /api/conversations/{id}/memory", s.handlePutConversationMemory)
 	m.HandleFunc("GET /api/memory/settings", s.handleGetMemorySettings)
 	m.HandleFunc("PUT /api/memory/settings", s.handlePutMemorySettings)
+	m.HandleFunc("GET /api/memory/archives", s.handleListMemoryArchives)
+	m.HandleFunc("GET /api/memory/archives/{id}", s.handleGetMemoryArchive)
 
 	// 命令（返回 ack，内容一律走 SSE）
 	m.HandleFunc("POST /api/conversations/{id}/messages", s.handleSendMessage)

@@ -148,6 +148,24 @@ export interface MemorySettingsResponse {
   schedule: string
 }
 
+export interface MemoryArchiveSummary {
+  conv_id: number
+  title: string
+  enabled: boolean
+  status: string
+  archived_before: number
+  archived_at: number
+  last_error: string
+}
+
+export interface MemoryArchiveDetail {
+  conv_id: number
+  content: string
+  total_chars: number
+  next_offset: number
+  has_more: boolean
+}
+
 /** POST /api/providers 请求体 */
 export interface CreateProviderInput {
   name?: string

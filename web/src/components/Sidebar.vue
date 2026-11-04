@@ -18,7 +18,7 @@ import { toast } from '@/stores/toast'
 import { relativeTime } from '@/utils/format'
 import SystemPromptDialog from './SystemPromptDialog.vue'
 
-const emit = defineEmits<{ (e: 'toggle'): void; (e: 'open-settings'): void }>()
+const emit = defineEmits<{ (e: 'toggle'): void; (e: 'open-settings'): void; (e: 'open-memory'): void }>()
 
 const convs = useConversationsStore()
 const chat = useChatStore()
@@ -170,6 +170,10 @@ async function onJump(r: SearchResult): Promise<void> {
   <aside class="sidebar">
     <div class="sidebar__head">
       <span class="sidebar__brand">Akatosh</span>
+      <button type="button" class="btn btn--sm sidebar__memory" title="查看记忆" @click="emit('open-memory')">
+        <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><use href="#i-doc" /></svg>
+        查看记忆
+      </button>
       <!-- 设置是全局的（供应商/默认提示词…），不放 session 窗口里 -->
       <button type="button" class="icon-btn" title="设置" @click="emit('open-settings')">
         <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true">

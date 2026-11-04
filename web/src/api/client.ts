@@ -20,6 +20,8 @@ import type {
   EditMessageInput,
   Health,
   Me,
+  MemoryArchiveDetail,
+  MemoryArchiveSummary,
   MemorySessionStatus,
   MemorySettingsResponse,
   Message,
@@ -408,6 +410,9 @@ export const api = {
     http.get<MemorySessionStatus>(`/api/conversations/${id}/memory`, options),
   setConversationMemory: (id: number, enabled: boolean, options?: RequestOptions) =>
     http.put<MemorySessionStatus>(`/api/conversations/${id}/memory`, { enabled }, options),
+  listMemoryArchives: (options?: RequestOptions) => http.get<MemoryArchiveSummary[]>('/api/memory/archives', options),
+  getMemoryArchive: (id: number, offset = 0, limit = 30000, options?: RequestOptions) =>
+    http.get<MemoryArchiveDetail>(`/api/memory/archives/${id}?offset=${offset}&limit=${limit}`, options),
 
   /* ---- 供应商 CRUD（可以配任意多家） ---- */
   listProviders: (options?: RequestOptions) => http.get<Provider[]>('/api/providers', options),

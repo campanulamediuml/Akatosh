@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -118,6 +119,52 @@ func (m *Manager) MaintenanceStatus(userID int64) (MaintenanceStatus, error) {
 		return MaintenanceStatus{}, err
 	}
 	return u.maintenanceStatus(), nil
+}
+
+type ArchiveSummary struct {
+	ConvID         int64  `json:"conv_id"`
+	Title          string `json:"title"`
+	Enabled        bool   `json:"enabled"`
+	Status         string `json:"status"`
+	ArchivedBefore int64  `json:"archived_before"`
+	ArchivedAt     int64  `json:"archived_at"`
+	LastError      string `json:"last_error"`
+}
+
+func (m *Manager) ListArchives(userID int64) ([]ArchiveSummary, error) {
+	u, err := m.user(userID)
+	if err != nil {
+		return nil, err
+	}
+	records, err := u.sessions()
+	if err != nil {
+		return nil, err
+	}
+	out := []ArchiveSummary{}
+	for i := range records {
+		r := &records[i]
+		if r.ArchivePath == "" || !m.archiveIntact(u, r) {
+			continue
+		}
+		conv, err := m.main.GetConversationForUser(r.ConvID, userID)
+		if err != nil {
+			return nil, err
+		}
+		if conv == nil {
+			continue
+		}
+		out = append(out, ArchiveSummary{
+			ConvID: r.ConvID, Title: conv.Title, Enabled: r.Enabled, Status: r.Status,
+			ArchivedBefore: r.ArchivedBefore, ArchivedAt: r.ArchivedAt, LastError: r.LastError,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ArchivedAt != out[j].ArchivedAt {
+			return out[i].ArchivedAt > out[j].ArchivedAt
+		}
+		return out[i].ConvID > out[j].ConvID
+	})
+	return out, nil
 }
 
 func (m *Manager) SessionStatus(userID, convID int64) (SessionStatus, error) {
