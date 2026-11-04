@@ -79,6 +79,22 @@ func main() {
 	if err != nil {
 		log.Fatalf("初始化附件目录失败: %v", err)
 	}
+	tempDir := filepath.Join(*miscDir, "tmp")
+	if err := os.MkdirAll(tempDir, 0o700); err != nil {
+		log.Fatalf("创建上传临时目录失败: %v", err)
+	}
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		log.Fatalf("检查上传临时目录失败: %v", err)
+	}
+	for _, entry := range entries {
+		if err := os.RemoveAll(filepath.Join(tempDir, entry.Name())); err != nil {
+			log.Fatalf("清理上传临时文件失败: %v", err)
+		}
+	}
+	if err := os.Setenv("TMPDIR", tempDir); err != nil {
+		log.Fatalf("设置上传临时目录失败: %v", err)
+	}
 	memoryManager, err := memory.NewManager(st, filepath.Join(*miscDir, "memory"))
 	if err != nil {
 		log.Fatalf("初始化记忆目录失败: %v", err)
