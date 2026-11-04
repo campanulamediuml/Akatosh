@@ -153,6 +153,36 @@ func (s *Server) handleGetMemoryArchive(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+func (s *Server) handlePutMemoryArchive(w http.ResponseWriter, r *http.Request) {
+	m := s.memoryManager(w)
+	if m == nil {
+		return
+	}
+	convID, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	var body struct {
+		Content *string `json:"content"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.Content == nil {
+		writeErr(w, http.StatusBadRequest, "bad_request", "content 不能为空")
+		return
+	}
+	if err := m.UpdateArchive(userOf(r).ID, convID, *body.Content); err != nil {
+		memoryError(w, err)
+		return
+	}
+	total := len([]rune(*body.Content))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"conv_id": convID, "content": *body.Content, "total_chars": total,
+		"next_offset": total, "has_more": false,
+	})
+}
+
 func memoryError(w http.ResponseWriter, err error) {
 	if strings.Contains(err.Error(), "不存在") {
 		writeErr(w, http.StatusNotFound, "not_found", err.Error())

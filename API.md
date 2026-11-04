@@ -665,6 +665,7 @@ misc/memory/users/<user_id>/
 - `PUT /api/memory/settings`：请求与 `background` 同形状，用于起标题和记忆归档；`provider_id=0` 或空模型表示跟随当前 Session，默认 effort=low。
 - `GET /api/memory/archives`：当前用户的已归档 Session 条目（标题、状态和覆盖范围），不暴露文件路径。
 - `GET /api/memory/archives/{id}?offset=0&limit=30000`：读取当前用户的详细归档，返回 `{conv_id,content,total_chars,next_offset,has_more}`。
+- `PUT /api/memory/archives/{id}`：请求 `{content:string}`，手工替换当前用户的完整归档正文并同步文件哈希，允许空正文；不修改原始消息、索引或归档范围，后续增量归档以修改后的正文为基础。
 - 每天 04:00（Asia/Shanghai）先由代码清理孤儿、修复索引和缺漏，再对启用且变化的 Session 调用模型。服务启动时补跑最近一次错过的维护。
 - `memory_read_session` 参数为 `{session_id,offset?,limit?}`。后端只接受当前用户清单里的 Session ID，并按字符分段返回；模型不能传文件路径，不能跨用户读取。
 - 删除 Session 同步删除其 sidecar 记录和归档；删除用户清理该用户整个记忆目录。夜间维护是异常清理的兜底。

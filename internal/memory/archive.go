@@ -73,6 +73,8 @@ func (m *Manager) RunMaintenance(ctx context.Context, userID int64) (Report, err
 	if err != nil {
 		return report, err
 	}
+	u.archiveMu.Lock()
+	defer u.archiveMu.Unlock()
 	records, err := u.sessions()
 	if err != nil {
 		return report, err
@@ -198,6 +200,38 @@ func fingerprintThrough(msgs []store.Message, before int64) string {
 		}
 	}
 	return fingerprintMessages(old)
+}
+
+func (m *Manager) UpdateArchive(userID, convID int64, content string) error {
+	conv, err := m.main.GetConversationForUser(convID, userID)
+	if err != nil {
+		return err
+	}
+	if conv == nil {
+		return fmt.Errorf("归档会话不存在")
+	}
+	u, err := m.user(userID)
+	if err != nil {
+		return err
+	}
+	u.archiveMu.Lock()
+	defer u.archiveMu.Unlock()
+	r, err := u.session(convID)
+	if err != nil {
+		return err
+	}
+	if r.ArchivePath == "" {
+		return fmt.Errorf("这个会话尚未归档；记忆每天 04:00 统一更新")
+	}
+	path, err := u.resolveArchive(r.ArchivePath)
+	if err != nil {
+		return err
+	}
+	if err := writeAtomic(u.root, path, []byte(content)); err != nil {
+		return err
+	}
+	sum := sha256.Sum256([]byte(content))
+	return u.updateArchiveHash(convID, hex.EncodeToString(sum[:]))
 }
 
 func (m *Manager) archiveIntact(u *userStore, r *sessionRecord) bool {

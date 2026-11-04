@@ -413,6 +413,8 @@ export const api = {
   listMemoryArchives: (options?: RequestOptions) => http.get<MemoryArchiveSummary[]>('/api/memory/archives', options),
   getMemoryArchive: (id: number, offset = 0, limit = 30000, options?: RequestOptions) =>
     http.get<MemoryArchiveDetail>(`/api/memory/archives/${id}?offset=${offset}&limit=${limit}`, options),
+  updateMemoryArchive: (id: number, content: string, options?: RequestOptions) =>
+    http.put<MemoryArchiveDetail>(`/api/memory/archives/${id}`, { content }, options),
 
   /* ---- 供应商 CRUD（可以配任意多家） ---- */
   listProviders: (options?: RequestOptions) => http.get<Provider[]>('/api/providers', options),

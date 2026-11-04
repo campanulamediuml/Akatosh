@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -52,9 +53,10 @@ type MaintenanceStatus struct {
 }
 
 type userStore struct {
-	userID int64
-	root   string
-	db     *sql.DB
+	userID    int64
+	root      string
+	db        *sql.DB
+	archiveMu sync.Mutex
 }
 
 func openUserStore(root string, userID int64) (*userStore, error) {
@@ -207,6 +209,11 @@ func (u *userStore) saveArchive(r *sessionRecord) error {
 	_, err := u.db.Exec(`UPDATE session_states SET status='done',archived_before=?,archived_at=?,last_error='',
 		archive_path=?,archive_hash=?,source_fingerprint=?,index_card=? WHERE conv_id=?`,
 		r.ArchivedBefore, r.ArchivedAt, r.ArchivePath, r.ArchiveHash, r.SourceFingerprint, r.IndexCard, r.ConvID)
+	return err
+}
+
+func (u *userStore) updateArchiveHash(convID int64, hash string) error {
+	_, err := u.db.Exec(`UPDATE session_states SET archive_hash=? WHERE conv_id=?`, hash, convID)
 	return err
 }
 

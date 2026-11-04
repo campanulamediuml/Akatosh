@@ -210,6 +210,64 @@ func TestArchiveLifecycleAndUserIsolation(t *testing.T) {
 	}
 }
 
+func TestUpdateArchive(t *testing.T) {
+	f := newMemoryFixture(t)
+	userID, convID := f.userWithConversation(t, "editor", "手工编辑")
+	otherUserID, _ := f.userWithConversation(t, "other", "其他用户")
+	f.addExchange(t, convID, "原始问题", "原始回答")
+	_, _ = f.mem.SetSessionEnabled(userID, convID, true)
+	if _, err := f.mem.RunMaintenance(context.Background(), userID); err != nil {
+		t.Fatal(err)
+	}
+	beforeMessages, err := f.st.ListMessages(convID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	edited := "SESSION：手工编辑\n\n保留  原始空白\n第二行🙂\n"
+	if err := f.mem.UpdateArchive(userID, convID, edited); err != nil {
+		t.Fatal(err)
+	}
+	content, total, more, err := f.mem.ReadArchive(userID, convID, 0, 30000)
+	if err != nil || content != edited || total != len([]rune(edited)) || more {
+		t.Fatalf("编辑后读取异常 content=%q total=%d more=%v err=%v", content, total, more, err)
+	}
+	u, _ := f.mem.user(userID)
+	r, _ := u.session(convID)
+	if !f.mem.archiveIntact(u, r) {
+		t.Fatal("编辑后没有同步归档哈希")
+	}
+	if err := f.mem.UpdateArchive(otherUserID, convID, "越权修改"); err == nil {
+		t.Fatal("跨用户修改归档没有被拒绝")
+	}
+	beforeRequests := len(f.up.captured())
+	report, err := f.mem.RunMaintenance(context.Background(), userID)
+	if err != nil || report.Skipped != 1 || report.Failed != 0 || len(f.up.captured()) != beforeRequests {
+		t.Fatalf("无新消息时维护重做了人工归档: %+v, %v", report, err)
+	}
+	content, _, _, _ = f.mem.ReadArchive(userID, convID, 0, 30000)
+	if content != edited {
+		t.Fatal("每日维护覆盖了人工编辑")
+	}
+	afterMessages, _ := f.st.ListMessages(convID)
+	if len(afterMessages) != len(beforeMessages) {
+		t.Fatal("编辑归档改变了原始消息")
+	}
+	for i := range beforeMessages {
+		if afterMessages[i].Content != beforeMessages[i].Content {
+			t.Fatal("编辑归档改变了原始消息正文")
+		}
+	}
+
+	if err := f.mem.UpdateArchive(userID, convID, ""); err != nil {
+		t.Fatal(err)
+	}
+	content, total, more, err = f.mem.ReadArchive(userID, convID, 0, 30000)
+	if err != nil || content != "" || total != 0 || more {
+		t.Fatalf("空正文保存异常 content=%q total=%d more=%v err=%v", content, total, more, err)
+	}
+}
+
 func TestArchiveIncrementEditDisableAndMissingFile(t *testing.T) {
 	f := newMemoryFixture(t)
 	userID, convID := f.userWithConversation(t, "increment", "增量归档")
