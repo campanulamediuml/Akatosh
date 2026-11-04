@@ -11,9 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"aiassistant/internal/imagegen"
 	"aiassistant/internal/llm"
-	"aiassistant/internal/sandbox"
 	"aiassistant/internal/search"
 	"aiassistant/internal/store"
 )
@@ -713,27 +711,7 @@ func effortLabel(effort string) string {
 }
 
 func (s *Session) toolDefs() []llm.Tool {
-	var tools []llm.Tool
-	// 联网搜索是会话级开关；Python 沙箱与图像生成配了执行端就全局可用。
-	if s.conv != nil && s.conv.WebSearch && s.mgr.search != nil {
-		tools = append(tools, search.ToolDef())
-	}
-	if s.mgr.sandbox != nil {
-		tools = append(tools, sandbox.ToolDef())
-	}
-	if s.mgr.imagegen != nil {
-		tools = append(tools, imagegen.ToolDef())
-	}
-	if s.mgr.media != nil {
-		tools = append(tools, readAttachmentToolDef())
-	}
-	if s.mgr.sandbox != nil && s.mgr.media != nil {
-		tools = append(tools, readFileToolDef())
-	}
-	if s.mgr.memory != nil && s.mgr.memory.Enabled(s.ownerID(), s.convID) {
-		tools = append(tools, memoryReadSessionToolDef())
-	}
-	return tools
+	return s.mgr.tools.Definitions(s)
 }
 
 func (s *Session) beginGeneration(cli *llm.Client, msgID, providerID int64, modelID, effort string, history []llm.ChatMessage) {
@@ -899,7 +877,7 @@ func (s *Session) onToolCalls(calls []llm.ToolCall) {
 	entries := make([]toolExecEntry, 0, len(calls))
 	for _, call := range calls {
 		entries = append(entries, toolExecEntry{call: call})
-		s.publishDelta(g.msgID, "tool", toolCallLabel(call))
+		s.publishDelta(g.msgID, "tool", s.mgr.tools.Label(call))
 	}
 
 	go func() {
@@ -912,203 +890,9 @@ func (s *Session) onToolCalls(calls []llm.ToolCall) {
 	}()
 }
 
-// toolCallLabel 生成界面上的状态行文本（「正在搜索：x」/「正在执行 Python…」）。
-func toolCallLabel(call llm.ToolCall) string {
-	switch call.Function.Name {
-	case search.ToolName:
-		return "正在搜索：" + search.ParseQuery(call.Function.Arguments)
-	case sandbox.ToolName:
-		return "正在执行 Python…"
-	case imagegen.ToolName:
-		prompt, _ := imagegen.ParsePrompt(call.Function.Arguments)
-		return "正在生成图片：" + imagegen.TruncatePrompt(prompt, 40)
-	case readAttachmentToolName:
-		return fmt.Sprintf("正在回看图片 #%d…", parseAttachmentID(call.Function.Arguments))
-	case readFileToolName:
-		return fmt.Sprintf("正在读取文件 #%d…", parseAttachmentID(call.Function.Arguments))
-	case memoryReadSessionToolName:
-		return "正在读取会话记忆…"
-	default:
-		return "调用了未知工具：" + call.Function.Name
-	}
-}
-
-// execToolCall 执行单个工具调用。在 goroutine 里跑，IO 不占会话 goroutine。
-// 任何失败（搜索超时、沙箱不可达、代码跑挂）都写成结果回传，不中断这一轮。
+// execToolCall 通过注册表执行单个工具调用；权限在执行时再次检查。
 func (s *Session) execToolCall(g *generation, e *toolExecEntry) {
-	switch e.call.Function.Name {
-	case search.ToolName:
-		if s.mgr.search == nil {
-			e.output = search.FormatToolResult(nil, fmt.Errorf("这个部署没有配置搜索后端"))
-			return
-		}
-		query := search.ParseQuery(e.call.Function.Arguments)
-		log.Printf("[gen] 会话 %d 联网搜索（第 %d 轮）: %q", s.convID, g.toolRounds, query)
-		results, err := s.mgr.search.Search(g.ctx, query)
-		if err != nil {
-			log.Printf("[gen] 会话 %d 搜索 %q 失败: %v", s.convID, query, err)
-		}
-		e.output = search.FormatToolResult(results, err)
-		e.record = search.NewRecord(query, results, err)
-	case sandbox.ToolName:
-		if s.mgr.sandbox == nil {
-			e.output = sandbox.FormatToolResult(sandbox.Result{}, fmt.Errorf("这个部署没有配置 Python 沙箱"))
-			return
-		}
-		code := sandbox.ParseCode(e.call.Function.Arguments)
-		log.Printf("[gen] 会话 %d 执行 Python（第 %d 轮，%d 字符）", s.convID, g.toolRounds, len(code))
-		r, err := s.mgr.sandbox.Run(g.ctx, code)
-		if err != nil {
-			log.Printf("[gen] 会话 %d Python 执行失败: %v", s.convID, err)
-		}
-		e.output = sandbox.FormatToolResult(r, err)
-		e.record = sandbox.NewRecord(code, r, err)
-	case imagegen.ToolName:
-		if s.mgr.imagegen == nil {
-			e.output = imagegen.FormatToolResult(fmt.Errorf("这个部署没有配置图像生成"), 0)
-			return
-		}
-		prompt, size := imagegen.ParsePrompt(e.call.Function.Arguments)
-		log.Printf("[gen] 会话 %d 生成图片（第 %d 轮）: %q", s.convID, g.toolRounds, imagegen.TruncatePrompt(prompt, 60))
-		img, mime, err := s.mgr.imagegen.Generate(g.ctx, prompt, size)
-		if err != nil {
-			log.Printf("[gen] 会话 %d 生成图片失败: %v", s.convID, err)
-			e.output = imagegen.FormatToolResult(err, 0)
-			e.record = imagegen.Record{Type: "image", Prompt: prompt, Error: err.Error()}
-			return
-		}
-		// 落盘 + 挂到正在生成的这条助手消息上：列表缩略图、点开看大图，走现成附件链路
-		attID, err := s.attachGeneratedImage(g.msgID, img)
-		if err != nil {
-			log.Printf("[gen] 会话 %d 图片落盘失败: %v", s.convID, err)
-			e.output = imagegen.FormatToolResult(fmt.Errorf("图片保存失败: %v", err), 0)
-			e.record = imagegen.Record{Type: "image", Prompt: prompt, Error: err.Error()}
-			return
-		}
-		if att, err := s.mgr.st.GetAttachmentInConv(attID, s.convID); err == nil && att != nil {
-			log.Printf("[gen] 会话 %d 图片生成成功  %dx%d %.0fKB", s.convID, att.Width, att.Height, float64(att.Size)/1024)
-		} else {
-			log.Printf("[gen] 会话 %d 图片生成成功（%.0fKB）", s.convID, float64(len(img))/1024)
-		}
-		e.output = imagegen.FormatToolResult(nil, attID)
-		// 支持的模型（DeepSeek/Kimi，见 supportsImageToolReceipt）：回执直接带上
-		// 图片本体——模型画完立刻能看到自己画了什么，当轮就能自检/迭代，
-		// 不用额外花一轮 read_attachment。tool 消息不落库，这张图只占当轮上下文；
-		// 跨轮回放仍是纯文本回执（imageToolRounds），需要时用 read_attachment。
-		if supportsImageToolReceipt(g.modelID) {
-			dataURL := "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(img)
-			e.outputParts = []llm.ContentPart{
-				llm.TextPart(imagegen.FormatToolResultWithImage(attID)),
-				llm.ImagePart(dataURL),
-			}
-			log.Printf("[gen] 会话 %d 生图回执带图（%s，base64 约 %.0f KB）",
-				s.convID, g.modelID, float64(len(dataURL))/1024)
-		}
-		e.record = imagegen.Record{Type: "image", Prompt: prompt}
-	case readAttachmentToolName:
-		id := parseAttachmentID(e.call.Function.Arguments)
-		a, err := s.mgr.st.GetAttachmentInConv(id, s.convID)
-		if err != nil || a == nil {
-			e.output = `{"error": "附件不存在或不属于这个会话"}`
-			return
-		}
-		dataURL, _, err := s.imageDataURL(*a) // 发送版（长边 ≤1024），模型够用
-		if err != nil {
-			e.output = fmt.Sprintf(`{"error": %q}`, "读取图片失败："+err.Error())
-			return
-		}
-		e.outputParts = []llm.ContentPart{
-			llm.TextPart("图片内容如下："),
-			llm.ImagePart(dataURL),
-		}
-	case readFileToolName:
-		if s.mgr.sandbox == nil {
-			e.output = `{"error": "这个部署没有配置 Python 沙箱，无法读取文件"}`
-			return
-		}
-		args, err := parseReadFileArgs(e.call.Function.Arguments)
-		if err != nil {
-			e.output = fmt.Sprintf(`{"error": %q}`, err.Error())
-			return
-		}
-		f, err := s.mgr.st.GetFileInConv(args.ID, s.convID)
-		if err != nil || f == nil {
-			e.output = `{"error": "文件不存在或不属于这个会话"}`
-			return
-		}
-		e.record = map[string]any{"type": "file", "name": f.Name, "id": f.ID, "images": args.Images}
-		if len(args.Pages) > 0 {
-			e.record.(map[string]any)["pages"] = args.Pages
-		}
-		isPDF := strings.EqualFold(f.Ext, ".pdf")
-		if (args.Images || len(args.Pages) > 0) && !isPDF {
-			e.output = `{"error": "pages 和 images 参数只支持 PDF 文件"}`
-			return
-		}
-		path := "/files/" + f.Hash + f.Ext
-		if args.Images {
-			if !supportsImageToolReceipt(g.modelID) {
-				e.output = `{"error": "当前模型不支持工具结果带图，无法按图片读取 PDF"}`
-				return
-			}
-			rendered, err := s.mgr.sandbox.RenderPDF(g.ctx, path, args.Pages)
-			if err != nil {
-				e.output = fmt.Sprintf(`{"error": %q}`, "PDF 页面渲染失败："+err.Error())
-				return
-			}
-			parts := []llm.ContentPart{llm.TextPart(fmt.Sprintf(
-				"PDF 文件 %q 共 %d 页。以下是指定页面的图片；图片仅在当前工具轮可用，后续需要时请重新调用 read_file。",
-				f.Name, rendered.TotalPages))}
-			for _, img := range rendered.Images {
-				parts = append(parts,
-					llm.TextPart(fmt.Sprintf("\n--- PDF 第 %d 页 ---", img.Page)),
-					llm.ImagePart("data:"+img.MIME+";base64,"+img.Data))
-			}
-			e.outputParts = parts
-			return
-		}
-		// 文本提取丢给 pybox：/files 是宿主机只读挂载，pypdf/docx/openpyxl/chardet 已预装
-		r, err := s.mgr.sandbox.Run(g.ctx, fileExtractScript(path, args.Pages))
-		var text string
-		if err != nil {
-			text = "提取失败: " + err.Error()
-		} else {
-			text = r.Stdout
-			if strings.TrimSpace(r.Stderr) != "" {
-				text += "\n[提取提示] " + strings.TrimSpace(r.Stderr)
-			}
-			if strings.TrimSpace(text) == "" {
-				text = "（提取完成，但没有文本内容——可能是扫描件或空文件）"
-			}
-		}
-		e.output = fmt.Sprintf(`{"name": %q, "content": %q}`, f.Name, truncateRunes(text, 30000))
-	case memoryReadSessionToolName:
-		if s.mgr.memory == nil || !s.mgr.memory.Enabled(s.ownerID(), s.convID) {
-			e.output = `{"error":"当前会话未开启记忆"}`
-			return
-		}
-		var args struct {
-			SessionID int64 `json:"session_id"`
-			Offset    int   `json:"offset"`
-			Limit     int   `json:"limit"`
-		}
-		if err := json.Unmarshal([]byte(e.call.Function.Arguments), &args); err != nil || args.SessionID <= 0 {
-			e.output = `{"error":"session_id 必须是正整数"}`
-			return
-		}
-		content, total, more, err := s.mgr.memory.ReadArchive(s.ownerID(), args.SessionID, args.Offset, args.Limit)
-		if err != nil {
-			e.output = fmt.Sprintf(`{"error":%q}`, err.Error())
-			return
-		}
-		next := args.Offset + len([]rune(content))
-		e.output = fmt.Sprintf(`{"session_id":%d,"content":%q,"total_chars":%d,"next_offset":%d,"has_more":%t}`,
-			args.SessionID, content, total, next, more)
-		e.record = map[string]any{"type": "memory", "session_id": args.SessionID}
-	default:
-		log.Printf("[gen] 会话 %d 模型调用了未知工具 %q，按失败结果回传", s.convID, e.call.Function.Name)
-		e.output = fmt.Sprintf(`{"error": %q}`, "未知工具 "+e.call.Function.Name)
-	}
+	s.mgr.tools.Execute(s, g, e)
 }
 
 // onToolResult 把工具结果追加进历史并续传下一段流。

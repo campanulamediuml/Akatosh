@@ -131,6 +131,7 @@ type Manager struct {
 	bus      *Bus
 	clientFn ClientFactory
 	titler   *Titler
+	tools    *ToolManager
 	// media 是 misc 目录的句柄（图片读写给后端用）；可以为 nil（不带图也能跑）
 	media *media.Store
 	// memory 是每用户独立 sidecar；nil = 不启用记忆功能。
@@ -160,6 +161,7 @@ func NewManagerWithMedia(st Store, bus *Bus, cf ClientFactory, mediaStore *media
 		st:         st,
 		bus:        bus,
 		clientFn:   cf,
+		tools:      newToolManager(),
 		media:      mediaStore,
 		compacting: map[int64]bool{},
 	}
