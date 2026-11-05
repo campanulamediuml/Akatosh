@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"aiassistant/internal/backup"
 	"aiassistant/internal/httpapi"
 	"aiassistant/internal/imagegen"
 	"aiassistant/internal/llm"
@@ -40,6 +41,7 @@ const version = "1.0.0"
 func main() {
 	addr := flag.String("addr", "127.0.0.1:28888", "监听地址（默认只绑本机；要让手机访问用 -addr 0.0.0.0:28888）")
 	dataDir := flag.String("data", "data", "数据目录，存放 sqlite 数据库")
+	backupDir := flag.String("backup-dir", "", "SQLite 一致性备份目录：启动后立即备份，此后每 12 小时覆盖一次；留空禁用")
 	miscDir := flag.String("misc", "misc", "附件目录，存放上传的图片（Docker 部署时可以单独挂载）")
 	tokenFlag := flag.String("token", "", "访问令牌：留空不鉴权，填 auto 自动生成并打印。手机访问时强烈建议设置")
 	searxngFlag := flag.String("searxng", "", "SearXNG 地址（如 http://searxng:8080）：配置后开启联网搜索（function calling）；留空禁用")
@@ -161,6 +163,17 @@ func main() {
 	defer stopMemoryScheduler()
 	go memoryManager.RunScheduler(schedulerCtx)
 	log.Printf("  长期记忆 : 每天 04:00 归档（按用户独立存储）")
+	if dir := strings.TrimSpace(*backupDir); dir != "" {
+		backupManager, err := backup.NewManager(st, dir)
+		if err != nil {
+			log.Printf("警告：初始化一致性备份失败: %v", err)
+		} else {
+			backupCtx, stopBackupScheduler := context.WithCancel(context.Background())
+			defer stopBackupScheduler()
+			go backupManager.RunScheduler(backupCtx)
+			log.Printf("  一致性备份 : 启动后立即执行，此后每 12 小时覆盖 %s", filepath.Join(dir, backup.Filename))
+		}
+	}
 
 	// 上下文压缩：默认 0.7，0 = 禁用
 	mgr.WithCompactThreshold(*compactFlag)
