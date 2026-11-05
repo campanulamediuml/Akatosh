@@ -501,9 +501,10 @@ DELETE /api/messages/{id}                                         -> 204
 所以 Docker 部署时可以把 `data`（SQLite）和 `misc`（图片）分别挂到不同的卷上。
 
 SQLite 一致性备份通过 `-backup-dir <目录>` 启用：服务启动后立即用 `VACUUM INTO` 备份一次，
-此后每 12 小时执行一次。临时副本通过 `PRAGMA quick_check` 后才原子替换目标目录中的
-`ai-assistant-backup.db`，因此只保留最新一份，失败时旧备份不受影响。不要直接复制运行中的
-主库和 WAL 文件作为备份。
+此后每小时执行一次。临时副本通过 `PRAGMA quick_check` 后才改名为
+`ai-assistant-YYYYMMDD-HHMMSS-NN.db`（`NN` 为同秒内的两位序号），并滚存保留最新 24 份。
+旧单文件 `ai-assistant-backup.db` 会在首份滚存备份成功后清理；备份失败时既有备份不受影响。
+不要直接复制运行中的主库和 WAL 文件作为备份。
 
 ```
 POST /api/uploads                  multipart/form-data，字段名 file（可以带多个），单文件 ≤20MB

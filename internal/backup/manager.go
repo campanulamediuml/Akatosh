@@ -7,6 +7,8 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -16,14 +18,18 @@ import (
 )
 
 const (
-	Filename = "ai-assistant-backup.db"
-	Interval = 12 * time.Hour
+	LegacyFilename = "ai-assistant-backup.db"
+	Interval       = time.Hour
+	Retain         = 24
 )
+
+var backupFilename = regexp.MustCompile(`^ai-assistant-[0-9]{8}-[0-9]{6}(-[0-9]{2})?\.db$`)
 
 type Manager struct {
 	st       *store.Store
 	dir      string
 	interval time.Duration
+	retain   int
 	mu       sync.Mutex
 }
 
@@ -41,7 +47,7 @@ func NewManager(st *store.Store, dir string) (*Manager, error) {
 	if err := os.MkdirAll(abs, 0o700); err != nil {
 		return nil, err
 	}
-	return &Manager{st: st, dir: abs, interval: Interval}, nil
+	return &Manager{st: st, dir: abs, interval: Interval, retain: Retain}, nil
 }
 
 func (m *Manager) RunOnce(ctx context.Context) (string, error) {
@@ -50,8 +56,11 @@ func (m *Manager) RunOnce(ctx context.Context) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	target := filepath.Join(m.dir, Filename)
-	tmp, err := os.CreateTemp(m.dir, "."+Filename+"-*.tmp")
+	target, err := m.nextTarget()
+	if err != nil {
+		return "", err
+	}
+	tmp, err := os.CreateTemp(m.dir, "."+LegacyFilename+"-*.tmp")
 	if err != nil {
 		return "", err
 	}
@@ -86,9 +95,53 @@ func (m *Manager) RunOnce(ctx context.Context) (string, error) {
 		return "", err
 	}
 	if err := os.Rename(tmpPath, target); err != nil {
-		return "", fmt.Errorf("替换旧备份失败: %w", err)
+		return "", fmt.Errorf("写入滚存备份失败: %w", err)
+	}
+	if err := m.prune(); err != nil {
+		return target, err
+	}
+	if err := os.Remove(filepath.Join(m.dir, LegacyFilename)); err != nil && !os.IsNotExist(err) {
+		return target, fmt.Errorf("清理旧单文件备份失败: %w", err)
 	}
 	return target, nil
+}
+
+func (m *Manager) nextTarget() (string, error) {
+	base := "ai-assistant-" + time.Now().Format("20060102-150405")
+	for i := 0; i < 100; i++ {
+		name := fmt.Sprintf("%s-%02d.db", base, i)
+		path := filepath.Join(m.dir, name)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			return path, nil
+		} else if err != nil {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("同一秒内的滚存备份过多")
+}
+
+func (m *Manager) prune() error {
+	entries, err := os.ReadDir(m.dir)
+	if err != nil {
+		return err
+	}
+	names := []string{}
+	for _, entry := range entries {
+		if !entry.IsDir() && backupFilename.MatchString(entry.Name()) {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	retain := m.retain
+	if retain <= 0 {
+		retain = Retain
+	}
+	for i := retain; i < len(names); i++ {
+		if err := os.Remove(filepath.Join(m.dir, names[i])); err != nil {
+			return fmt.Errorf("清理过期备份 %s 失败: %w", names[i], err)
+		}
+	}
+	return nil
 }
 
 func (m *Manager) RunScheduler(ctx context.Context) {

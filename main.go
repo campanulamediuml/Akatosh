@@ -41,7 +41,7 @@ const version = "1.0.0"
 func main() {
 	addr := flag.String("addr", "127.0.0.1:28888", "监听地址（默认只绑本机；要让手机访问用 -addr 0.0.0.0:28888）")
 	dataDir := flag.String("data", "data", "数据目录，存放 sqlite 数据库")
-	backupDir := flag.String("backup-dir", "", "SQLite 一致性备份目录：启动后立即备份，此后每 12 小时覆盖一次；留空禁用")
+	backupDir := flag.String("backup-dir", "", "SQLite 一致性备份目录：启动后立即备份，此后每小时滚存 24 份；留空禁用")
 	miscDir := flag.String("misc", "misc", "附件目录，存放上传的图片（Docker 部署时可以单独挂载）")
 	tokenFlag := flag.String("token", "", "访问令牌：留空不鉴权，填 auto 自动生成并打印。手机访问时强烈建议设置")
 	searxngFlag := flag.String("searxng", "", "SearXNG 地址（如 http://searxng:8080）：配置后开启联网搜索（function calling）；留空禁用")
@@ -171,7 +171,7 @@ func main() {
 			backupCtx, stopBackupScheduler := context.WithCancel(context.Background())
 			defer stopBackupScheduler()
 			go backupManager.RunScheduler(backupCtx)
-			log.Printf("  一致性备份 : 启动后立即执行，此后每 12 小时覆盖 %s", filepath.Join(dir, backup.Filename))
+			log.Printf("  一致性备份 : 启动后立即执行，此后每小时在 %s 滚存 24 份", dir)
 		}
 	}
 
