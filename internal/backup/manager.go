@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -23,7 +24,7 @@ const (
 	Retain         = 24
 )
 
-var backupFilename = regexp.MustCompile(`^ai-assistant-[0-9]{8}-[0-9]{6}(-[0-9]{2})?\.db$`)
+var backupFilename = regexp.MustCompile(`^ai-assistant-[0-9]{8}-[0-9]{6}(-[0-9]{2})?\.(db|sql)$`)
 
 type Manager struct {
 	st       *store.Store
@@ -74,11 +75,20 @@ func (m *Manager) RunOnce(ctx context.Context) (string, error) {
 	}
 	defer os.Remove(tmpPath)
 
-	if err := m.st.Backup(ctx, tmpPath); err != nil {
-		return "", err
-	}
-	if err := check(tmpPath); err != nil {
-		return "", err
+	if m.st.IsMySQL() {
+		if err := m.st.BackupMySQL(ctx, tmpPath); err != nil {
+			return "", err
+		}
+		if err := checkMySQLDump(tmpPath); err != nil {
+			return "", err
+		}
+	} else {
+		if err := m.st.Backup(ctx, tmpPath); err != nil {
+			return "", err
+		}
+		if err := check(tmpPath); err != nil {
+			return "", err
+		}
 	}
 	if err := os.Chmod(tmpPath, 0o600); err != nil {
 		return "", err
@@ -108,8 +118,12 @@ func (m *Manager) RunOnce(ctx context.Context) (string, error) {
 
 func (m *Manager) nextTarget() (string, error) {
 	base := "ai-assistant-" + time.Now().Format("20060102-150405")
+	ext := ".db"
+	if m.st.IsMySQL() {
+		ext = ".sql"
+	}
 	for i := 0; i < 100; i++ {
-		name := fmt.Sprintf("%s-%02d.db", base, i)
+		name := fmt.Sprintf("%s-%02d%s", base, i, ext)
 		path := filepath.Join(m.dir, name)
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			return path, nil
@@ -197,4 +211,37 @@ func check(path string) error {
 		}
 	}
 	return rows.Err()
+}
+
+func checkMySQLDump(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() < 128 {
+		return fmt.Errorf("MySQL 备份文件不完整")
+	}
+	header := make([]byte, 256)
+	if _, err := io.ReadFull(file, header); err != nil {
+		return err
+	}
+	if !strings.Contains(string(header), "Akatosh MySQL backup") {
+		return fmt.Errorf("MySQL 备份缺少文件头")
+	}
+	tail := make([]byte, 256)
+	if _, err := file.Seek(-256, io.SeekEnd); err != nil {
+		return err
+	}
+	if _, err := io.ReadFull(file, tail); err != nil {
+		return err
+	}
+	if !strings.Contains(string(tail), "Akatosh backup complete") {
+		return fmt.Errorf("MySQL 备份缺少结束标记")
+	}
+	return nil
 }

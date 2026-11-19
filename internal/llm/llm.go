@@ -283,7 +283,7 @@ func (c *Client) Ping(ctx context.Context, model string) (time.Duration, error) 
 	}
 	body := map[string]any{
 		"model":      model,
-		"messages":   []ChatMessage{{Role: "user", Content: "ping"}},
+		"messages":   []ChatMessage{{Role: "user", Content: "测试"}},
 		"max_tokens": 1,
 		"stream":     false,
 	}

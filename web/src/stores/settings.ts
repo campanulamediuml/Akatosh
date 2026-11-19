@@ -56,13 +56,16 @@ interface SettingsState {
   defaults: SettingsDefaults
   /** 所有供应商的模型（GET /api/models，每项带 provider_id） */
   models: Model[]
-  /** 后端是否配置了搜索后端（-searxng）；false 时 Composer 不显示「联网」开关 */
+  /** 后端是否配置了任意搜索后端；false 时 Composer 不显示「联网」开关 */
   webSearchAvailable: boolean
   /** 上下文压缩阈值（0~1，0 = 禁用） */
   compactThreshold: number
 
   /** 当前登录用户（GET /api/me）；null = 还没拉过 */
   me: Me | null
+  modelHealthEnabled: boolean
+  modelHealthConcurrency: number
+  savingModelHealthConcurrency: boolean
 
   /** 用户管理（管理员）：用户列表与操作态 */
   users: UserInfo[]
@@ -106,6 +109,9 @@ export const useSettingsStore = defineStore('settings', {
     webSearchAvailable: false,
     compactThreshold: 0,
     me: null,
+    modelHealthEnabled: false,
+    modelHealthConcurrency: 16,
+    savingModelHealthConcurrency: false,
     users: [],
     loadingUsers: false,
     savingProvider: false,
@@ -221,10 +227,52 @@ export const useSettingsStore = defineStore('settings', {
       if (this.loading) return
       this.loading = true
       try {
-        await Promise.all([this.loadMe(), this.loadSettings(), this.loadModels(), this.loadMemorySettings()])
+        await Promise.all([
+          this.loadMe(),
+          this.loadSettings(),
+          this.loadModels(),
+          this.loadMemorySettings(),
+          this.loadModelHealth(),
+        ])
+        if (this.isAdmin) await this.loadModelHealthConcurrency()
       } finally {
         this.loading = false
         this.loaded = true
+      }
+    },
+
+    async loadModelHealth(): Promise<void> {
+      try {
+        const res = await api.getModelHealth()
+        this.modelHealthEnabled = res.enabled
+      } catch {
+        this.modelHealthEnabled = false
+      }
+    },
+
+    async loadModelHealthConcurrency(): Promise<void> {
+      try {
+        const res = await api.getModelHealthConcurrency()
+        this.modelHealthConcurrency = res.concurrency
+      } catch (err) {
+        toast.error(`读取全局检测并发失败：${toError(err).message}`)
+      }
+    },
+
+    async saveModelHealthConcurrency(concurrency: number): Promise<SaveResult> {
+      if (this.savingModelHealthConcurrency) return { ok: false, message: '正在保存' }
+      this.savingModelHealthConcurrency = true
+      try {
+        const res = await api.setModelHealthConcurrency(concurrency)
+        this.modelHealthConcurrency = res.concurrency
+        toast.success(`全局检测并发已设为 ${res.concurrency}，下一轮生效`)
+        return { ok: true, message: '已保存' }
+      } catch (err) {
+        const message = toError(err).message
+        toast.error(`保存全局检测并发失败：${message}`)
+        return { ok: false, message }
+      } finally {
+        this.savingModelHealthConcurrency = false
       }
     },
 
@@ -306,6 +354,20 @@ export const useSettingsStore = defineStore('settings', {
         return true
       } catch (err) {
         toast.error(`删除用户失败：${toError(err).message}`)
+        return false
+      }
+    },
+
+    async setUserModelHealth(id: number, enabled: boolean): Promise<boolean> {
+      try {
+        await api.setUserModelHealth(id, enabled)
+        const user = this.users.find((u) => u.id === id)
+        if (user) user.model_health_enabled = enabled
+        if (id === this.me?.id) this.modelHealthEnabled = enabled
+        toast.success(enabled ? '已开启每分钟模型检测' : '已关闭模型检测')
+        return true
+      } catch (err) {
+        toast.error(`保存模型检测开关失败：${toError(err).message}`)
         return false
       }
     },

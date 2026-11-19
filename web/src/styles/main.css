@@ -1957,6 +1957,18 @@ a:hover {
   font-size: var(--fs-sm);
 }
 
+.picker__item-main--ok {
+  color: var(--success);
+}
+
+.picker__item-main--error {
+  color: var(--danger);
+}
+
+.picker__item-main--pending {
+  color: var(--text-faint);
+}
+
 .picker__item-note {
   flex: 0 0 auto;
   font-size: var(--fs-xs);

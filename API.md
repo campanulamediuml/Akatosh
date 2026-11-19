@@ -116,15 +116,32 @@ POST   /api/users            <- {"name":"小明"}    # 仅管理员；name 为�
                               -> 201 {"user": User, "token": "64 位十六进制"}
 POST   /api/users/{id}/token -> 200 {"token":"…"}  # 仅管理员；重置令牌，旧令牌**立即失效**；
                               -> 404 not_found（用户不存在）
+PUT    /api/users/{id}/model-health <- {"enabled":true}
+                              -> 200 {"enabled":true}   # 本人或管理员；开启后立即检测，此后每分钟一轮
 DELETE /api/users/{id}       -> 204               # 仅管理员
                               -> 400 bad_request（试图删除当前登录的自己 / 最后一个管理员）
                               -> 404 not_found（用户不存在）
+
+GET    /api/model-health     -> 200 {"enabled":true,"models":{
+                                  "6:gpt-6.1-sol":{"ok":true,"checked_at":…,"latency_ms":123},
+                                  "6:bad-model":{"ok":false,"checked_at":…,"latency_ms":0,"error":"…"}}}
+                                  # 当前用户；键为 provider_id:model_id，缺失 = 等待首次检测
+GET    /api/model-health/concurrency -> 200 {"concurrency":16}  # 仅管理员
+PUT    /api/model-health/concurrency <- {"concurrency":24}
+                                     -> 200 {"concurrency":24}  # 仅管理员；范围 1–64，下一轮生效
 ```
 
 ```json
 User = { "id": 1, "name": "admin", "is_admin": true,
-         "created_at": 1750000000000, "last_seen_at": 1750000000000 }
+         "created_at": 1750000000000, "last_seen_at": 1750000000000,
+         "model_health_enabled": true }
 ```
+
+模型检测开关按用户存于 `user_settings.model_health_enabled`，检测结果保存在内存。开启后该用户
+每个供应商的每个模型每分钟收到一次非流式 `测试`（`max_tokens=1`，单请求 20 秒超时）。
+所有开启检测的用户共享一个全局 worker 池；管理员配置的并发数是整个服务的总上限，默认 16，
+存于全局 `settings.model_health_concurrency`，修改从下一轮开始生效，慢轮次不重叠。
+关闭会清除旧状态，删除用户也会清掉其内存结果。
 
 - `GET /api/me` 是前端判断「显不显示用户管理入口」的唯一依据（看 `is_admin`）。
 - **明文令牌只在创建 / 重置的响应里出现一次**，之后任何接口都拿不回来（库里只有哈希），
@@ -498,16 +515,18 @@ DELETE /api/messages/{id}                                         -> 204
 ## 5. 附件（图片）
 
 上传的图片存在**独立于数据库的 misc 目录**里（`-misc` 参数，默认 `./misc`），
-所以 Docker 部署时可以把 `data`（SQLite）和 `misc`（图片）分别挂到不同的卷上。
+新文件按 `images/<会话ID>/<图片ID>.<扩展名>` 归档，同目录保存缩略图与发送版；
+旧哈希目录会在启动时迁移。Docker 部署时可以把数据库（SQLite 或 MySQL）和 `misc`（图片）分别挂载。
 
-SQLite 一致性备份通过 `-backup-dir <目录>` 启用：服务启动后立即用 `VACUUM INTO` 备份一次，
-此后每小时执行一次。临时副本通过 `PRAGMA quick_check` 后才改名为
-`ai-assistant-YYYYMMDD-HHMMSS-NN.db`（`NN` 为同秒内的两位序号），并滚存保留最新 24 份。
-旧单文件 `ai-assistant-backup.db` 会在首份滚存备份成功后清理；备份失败时既有备份不受影响。
-不要直接复制运行中的主库和 WAL 文件作为备份。
+一致性备份通过 `-backup-dir <目录>` 启用：启动后立即备份一次，此后每小时执行，滚存保留最新 24 份。
+SQLite 使用 `VACUUM INTO` 并通过 `PRAGMA quick_check`，生成 `ai-assistant-YYYYMMDD-HHMMSS-NN.db`；
+MySQL 使用只读可重复读事务导出 schema 与数据，生成同命名规则的 `.sql`，包含主表与记忆表。
+备份均先写临时文件、校验后原子改名，失败不影响既有备份。SQLite 运行库与 WAL 不要直接复制作为备份。
 
 ```
 POST /api/uploads                  multipart/form-data，字段名 file（可以带多个），单文件 ≤20MB
+                                   可选字段 conv_id：直接归入该会话的图片目录；
+                                   省略时先放 images/unassigned，发消息时再绑定
 -> 200 {"attachments":[Attachment,…]}
 -> 400 {"error":{"code":"bad_request","message":"…"}}     # 非图片 / 超过 20MB
 -> 500 internal（这个部署没启用图片，即 misc 目录未配置）
@@ -617,7 +636,7 @@ GET  /api/models?provider_id=2   -> [Model,…]     # 只看某一家
 GET  /api/settings
 -> { "providers": [Provider,…],                    # 与 GET /api/providers 相同，省一次请求
      "defaults": {"provider_id":2,"model_id":"deepseek-chat","effort":"medium","system_prompt":""},
-     "web_search_available": true,                  # 部署配了 -searxng 才为 true；前端据此显示联网搜索开关
+     "web_search_available": true,                  # 配置了 Tavily、Serper 或 SearXNG 任一搜索后端即为 true
      "compact_threshold": 0.7 }                     # 上下文压缩阈值（0~1），只用于前端进度条提示；
                                                     # 压缩本身是手动触发（§3.4），0 = 不提示
 
@@ -652,13 +671,14 @@ Model = { "id":3, "provider_id":2, "model_id":"deepseek-reasoner", "display_name
 
 ---
 
-## 7. 长期记忆（独立 sidecar，多租户隔离）
+## 7. 长期记忆（多租户隔离）
 
-记忆不修改主库 `ai-assistant.db` 的 schema，也不在 `Conversation` / `State` 中夹带持久化字段。每个用户有独立的 SQLite 和文件树：
+SQLite 模式下每个用户有独立 sidecar；MySQL 模式下记录进入 `memory_settings`、
+`memory_maintenance`、`memory_session_states`，全部带 `user_id`。两种模式的文件树相同：
 
 ```text
 misc/memory/users/<user_id>/
-├── memory.db
+├── memory.db               # 仅 SQLite；MySQL 不使用这个文件
 ├── index.txt
 ├── <yyyy-mm>/index.txt
 ├── <yyyy-mm>/session-<conversation_id>.txt

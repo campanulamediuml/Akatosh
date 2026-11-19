@@ -68,7 +68,7 @@ func (s *Store) AttachFileToMessage(messageID int64, fileIDs []int64) error {
 	for _, fid := range fileIDs {
 		if _, err := s.db.Exec(
 			`INSERT OR IGNORE INTO message_files(message_id, file_id, seq)
-			 VALUES(?, ?, (SELECT COALESCE(MAX(seq),0)+1 FROM message_files WHERE message_id = ?))`,
+			 VALUES(?, ?, (SELECT COALESCE(MAX(seq),0)+1 FROM (SELECT seq FROM message_files WHERE message_id = ?) AS mf_seq))`,
 			messageID, fid, messageID); err != nil {
 			return err
 		}

@@ -33,7 +33,7 @@ func newToolManager() *ToolManager {
 	m := &ToolManager{tools: map[string]ToolRegistration{}}
 	m.Register(ToolRegistration{
 		Name: search.ToolName, Definition: search.ToolDef,
-		Enabled: func(s *Session) bool { return s.conv != nil && s.conv.WebSearch && s.mgr.search != nil },
+		Enabled: func(s *Session) bool { return s.conv != nil && s.conv.WebSearch && s.mgr.hasSearch(search.ToolName) },
 		Label:   func(call llm.ToolCall) string { return "正在搜索：" + search.ParseQuery(call.Function.Arguments) },
 		Call:    executeSearchTool,
 	})
@@ -126,14 +126,23 @@ func (m *ToolManager) Execute(s *Session, g *generation, e *toolExecEntry) {
 }
 
 func executeSearchTool(s *Session, g *generation, e *toolExecEntry) {
+	provider, ok := s.mgr.searchProvider(e.call.Function.Name)
+	if !ok {
+		e.output = `{"error": "搜索后端未配置"}`
+		return
+	}
 	query := search.ParseQuery(e.call.Function.Arguments)
-	log.Printf("[gen] 会话 %d 联网搜索（第 %d 轮）: %q", s.convID, g.toolRounds, query)
-	results, err := s.mgr.search.Search(g.ctx, query)
+	log.Printf("[gen] 会话 %d %s 搜索（第 %d 轮）: %q", s.convID, provider.DisplayName, g.toolRounds, query)
+	results, err := provider.Search(g.ctx, query)
 	if err != nil {
-		log.Printf("[gen] 会话 %d 搜索 %q 失败: %v", s.convID, query, err)
+		log.Printf("[gen] 会话 %d %s 搜索 %q 失败: %v", s.convID, provider.DisplayName, query, err)
+	} else {
+		log.Printf("[gen] 会话 %d %s 搜索 %q 返回 %d 条", s.convID, provider.DisplayName, query, len(results))
 	}
 	e.output = search.FormatToolResult(results, err)
-	e.record = search.NewRecord(query, results, err)
+	record := search.NewRecord(query, results, err)
+	record.Provider = provider.DisplayName
+	e.record = record
 }
 
 func executePythonTool(s *Session, g *generation, e *toolExecEntry) {

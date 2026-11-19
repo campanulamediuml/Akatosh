@@ -416,7 +416,7 @@ func (s *Store) ForkConversation(convID, beforeMsgID, newUserID int64) (*Convers
 		for _, a := range atts {
 			if _, err := s.db.Exec(
 				`INSERT OR IGNORE INTO message_attachments(message_id, attachment_id, seq)
-				 VALUES(?, ?, (SELECT COALESCE(MAX(seq),0)+1 FROM message_attachments WHERE message_id = ?))`,
+				 VALUES(?, ?, (SELECT COALESCE(MAX(seq),0)+1 FROM (SELECT seq FROM message_attachments WHERE message_id = ?) AS ma_seq))`,
 				newMsgID, a.ID, newMsgID); err != nil {
 				return nil, err
 			}
@@ -429,7 +429,7 @@ func (s *Store) ForkConversation(convID, beforeMsgID, newUserID int64) (*Convers
 		for _, f := range files {
 			if _, err := s.db.Exec(
 				`INSERT OR IGNORE INTO message_files(message_id, file_id, seq)
-				 VALUES(?, ?, (SELECT COALESCE(MAX(seq),0)+1 FROM message_files WHERE message_id = ?))`,
+				 VALUES(?, ?, (SELECT COALESCE(MAX(seq),0)+1 FROM (SELECT seq FROM message_files WHERE message_id = ?) AS mf_seq))`,
 				newMsgID, f.ID, newMsgID); err != nil {
 				return nil, err
 			}

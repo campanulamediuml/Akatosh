@@ -54,7 +54,7 @@ $etag = ($h | Select-String -Pattern 'ETag: (.+)').Matches.Groups[1].Value.Trim(
 $cc = ($h | Select-String -Pattern 'Cache-Control: (.+)').Matches.Groups[1].Value.Trim()
 "  ETag=$etag"
 "  Cache-Control=$cc"
-if ($cc -match 'immutable') { Pass "内容寻址 → 可以 immutable 长缓存" } else { Fail "缺 Cache-Control" }
+if ($cc -match 'immutable') { Pass "附件内容不变 → 可以 immutable 长缓存" } else { Fail "缺 Cache-Control" }
 $code304 = curl.exe -s -o NUL -w "%{http_code}" -H "If-None-Match: $etag" "$base$($att.thumb_url)"
 if ($code304 -eq '304') { Pass "带 If-None-Match 返回 304" } else { Fail "304 没生效，实际 $code304" }
 

@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -41,8 +42,8 @@ func attachmentView(a *store.Attachment) map[string]any {
 	}
 }
 
-// handleUpload 收图片：算哈希落盘、生成缩略图与发送版、登记元数据。
-// 同一张图重复上传会命中去重，只返回已有记录。
+// handleUpload 收图片并登记元数据。表单带 conv_id 时直接落到该会话目录，
+// 否则先放 unassigned，发消息挂载时再移动。
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if s.media == nil {
 		writeErr(w, http.StatusInternalServerError, "internal", "这个部署没有启用图片（misc 目录未配置）")
@@ -58,6 +59,25 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			_ = r.MultipartForm.RemoveAll()
 		}
 	}()
+
+	var convID int64
+	if raw := strings.TrimSpace(r.FormValue("conv_id")); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed <= 0 {
+			writeErr(w, http.StatusBadRequest, "bad_request", "conv_id 非法")
+			return
+		}
+		conv, err := s.st.GetConversationForUser(parsed, userOf(r).ID)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		if conv == nil {
+			writeErr(w, http.StatusNotFound, "not_found", "会话不存在")
+			return
+		}
+		convID = parsed
+	}
 
 	files := r.MultipartForm.File["file"]
 	if len(files) == 0 {
@@ -79,12 +99,19 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "bad_request", friendlyMediaErr(err))
 			return
 		}
-		log.Printf("[upload] %s  %.0f KB %dx%d → 缩略图 %.0f KB / 发送版 %.0f KB  用时 %dms",
-			fh.Filename, float64(saved.Size)/1024, saved.Width, saved.Height,
-			float64(fileSizeOf(s.media.ThumbPath(saved.Hash)))/1024,
-			float64(fileSizeOf(s.media.SendPath(saved.Hash)))/1024,
-			time.Since(started).Milliseconds())
 
+		prev, err := s.st.GetAttachmentByHash(saved.Hash)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "internal", err.Error())
+			return
+		}
+		if prev != nil {
+			if !saved.Reused {
+				_ = s.media.Remove(saved.Hash, saved.Ext)
+			}
+			out = append(out, attachmentView(prev))
+			continue
+		}
 		att, err := s.st.CreateAttachment(store.Attachment{
 			UserID: userOf(r).ID,
 			Hash:   saved.Hash,
@@ -97,9 +124,18 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 			Height: saved.Height,
 		})
 		if err != nil {
+			_ = s.media.Remove(saved.Hash, saved.Ext)
 			writeErr(w, http.StatusInternalServerError, "internal", err.Error())
 			return
 		}
+		if err := s.media.Place(att.ID, convID, saved.Hash, saved.Ext); err != nil {
+			log.Printf("[media] 图片 %d 移到会话 %d 失败，保留旧路径: %v", att.ID, convID, err)
+		}
+		log.Printf("[upload] %s  %.0f KB %dx%d → 缩略图 %.0f KB / 发送版 %.0f KB  用时 %dms",
+			fh.Filename, float64(saved.Size)/1024, saved.Width, saved.Height,
+			float64(fileSizeOf(s.media.ThumbPathByID(att.ID, saved.Hash)))/1024,
+			float64(fileSizeOf(s.media.SendPathByID(att.ID, saved.Hash)))/1024,
+			time.Since(started).Milliseconds())
 		out = append(out, attachmentView(att))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"attachments": out})
@@ -162,9 +198,9 @@ func (s *Server) serveAttachment(w http.ResponseWriter, r *http.Request, thumb b
 		mime string
 	)
 	if thumb {
-		f, mime, err = s.media.OpenThumb(att.Hash, att.Ext)
+		f, mime, err = s.media.OpenThumbByID(att.ID, att.Hash, att.Ext)
 	} else {
-		f, err = s.media.Open(att.Hash, att.Ext)
+		f, err = s.media.OpenByID(att.ID, att.Hash, att.Ext)
 		mime = att.MIME
 	}
 	if err != nil {
@@ -176,7 +212,7 @@ func (s *Server) serveAttachment(w http.ResponseWriter, r *http.Request, thumb b
 	if mime != "" {
 		w.Header().Set("Content-Type", mime)
 	}
-	// 内容是内容寻址的（文件名就是 sha256）→ 永远不会变，可以放心长缓存。
+	// 附件内容落库后不变，URL 按附件 ID 隔离，可以长期缓存。
 	// 这也是"图多的会话恢复起来不慢"的关键：第二次打开直接走浏览器缓存。
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	etag := `"` + att.Hash + `"`

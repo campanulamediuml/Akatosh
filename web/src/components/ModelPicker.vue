@@ -15,7 +15,8 @@
  *   用上游自己的默认行为（像 deepseek-reasoner 这类模型本来就会思考，叫「关闭」不准确）。
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import type { Model } from '@/api/types'
+import { api } from '@/api/client'
+import type { Model, ModelHealthResponse, ModelHealthStatus } from '@/api/types'
 import { EFFORT_LABELS, modelKey } from '@/api/types'
 import { useChatStore } from '@/stores/chat'
 import { useSettingsStore } from '@/stores/settings'
@@ -26,6 +27,42 @@ const settings = useSettingsStore()
 
 const root = ref<HTMLElement | null>(null)
 const openMenu = ref<'' | 'model' | 'effort'>('')
+const health = ref<ModelHealthResponse>({ enabled: false, models: {} })
+let healthLoading = false
+let healthTimer: ReturnType<typeof setInterval> | undefined
+
+async function loadHealth(): Promise<void> {
+  if (healthLoading) return
+  healthLoading = true
+  try {
+    const res = await api.getModelHealth()
+    health.value = { enabled: res?.enabled === true, models: res?.models ?? {} }
+  } catch {
+    // 状态接口短暂失败时保留上次颜色，避免列表闪烁。
+  } finally {
+    healthLoading = false
+  }
+}
+
+function healthOf(model: Model): ModelHealthStatus | undefined {
+  return health.value.models[modelKey(model.provider_id, model.model_id)]
+}
+
+function healthClass(model: Model): string {
+  if (!health.value.enabled) return ''
+  const status = healthOf(model)
+  if (!status) return 'picker__item-main--pending'
+  return status.ok ? 'picker__item-main--ok' : 'picker__item-main--error'
+}
+
+function healthTitle(model: Model): string {
+  if (!health.value.enabled) return ''
+  const status = healthOf(model)
+  if (!status) return '等待首次检测'
+  const time = new Date(status.checked_at).toLocaleTimeString()
+  if (status.ok) return `检测正常 · ${status.latency_ms}ms · ${time}`
+  return `检测失败：${status.error || '未知错误'} · ${time}`
+}
 
 /** 下拉里的一行：模型 + 它属于哪家（模板里用复合键做 :key，同名模型也不会撞） */
 interface ModelOption {
@@ -129,8 +166,9 @@ const runningHint = computed(() => {
 })
 
 const modelTriggerTitle = computed(() => {
-  if (runningHint.value) return runningHint.value
-  return currentProviderName.value ? `${currentProviderName.value} · ${modelLabel.value}` : '选择模型'
+  const base = runningHint.value || (currentProviderName.value ? `${currentProviderName.value} · ${modelLabel.value}` : '选择模型')
+  const status = currentModel.value ? healthTitle(currentModel.value) : ''
+  return status ? `${base}\n${status}` : base
 })
 
 function isActive(m: Model): boolean {
@@ -140,6 +178,7 @@ function isActive(m: Model): boolean {
 function toggle(which: 'model' | 'effort'): void {
   if (which === 'effort' && !supportsEffort.value) return
   openMenu.value = openMenu.value === which ? '' : which
+  if (openMenu.value === 'model') void loadHealth()
 }
 
 function close(): void {
@@ -178,8 +217,15 @@ function onPointerDown(e: PointerEvent): void {
   close()
 }
 
-onMounted(() => document.addEventListener('pointerdown', onPointerDown, true))
-onBeforeUnmount(() => document.removeEventListener('pointerdown', onPointerDown, true))
+onMounted(() => {
+  document.addEventListener('pointerdown', onPointerDown, true)
+  void loadHealth()
+  healthTimer = setInterval(() => void loadHealth(), 30_000)
+})
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', onPointerDown, true)
+  if (healthTimer !== undefined) clearInterval(healthTimer)
+})
 </script>
 
 <template>
@@ -194,7 +240,7 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onPointerDown,
         @click="toggle('model')"
       >
         <span v-if="currentProviderName" class="picker__provider">{{ currentProviderName }}</span>
-        <span class="picker__label">{{ modelLabel }}</span>
+        <span class="picker__label" :class="currentModel ? healthClass(currentModel) : ''">{{ modelLabel }}</span>
         <svg class="picker__caret" width="11" height="11" viewBox="0 0 16 16" aria-hidden="true">
           <use href="#i-chevron-down" />
         </svg>
@@ -213,7 +259,9 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onPointerDown,
             :class="{ 'picker__item--active': isActive(opt.model) }"
             @click="pickModel(opt.model)"
           >
-            <span class="picker__item-main">{{ opt.model.model_id }}</span>
+            <span class="picker__item-main" :class="healthClass(opt.model)" :title="healthTitle(opt.model)">
+              {{ opt.model.model_id }}
+            </span>
             <span v-if="opt.model.context_len" class="picker__item-note">
               {{ abbreviateNumber(opt.model.context_len) }}
             </span>

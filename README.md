@@ -7,11 +7,10 @@
 Akatosh 是一个以“时间线”为核心的本地多用户 LLM Agent：它把每一次对话都视为可回放、
 可编辑、可分叉的历史——CoT、正文、工具调用与上下文压缩都会完整落库；你可以修改某个节点、
 从任意消息 fork 出新分支，让不同的推理路径并行演化。联网搜索、Python 沙箱、文档读取和图像
-生成以 function calling 接入，所有数据默认保存在本机 SQLite 与附件目录中，适合自己掌控数据、
-上下文和成本的长期使用。
+生成以 function calling 接入，数据默认保存在本机 SQLite 与附件目录中，也可切换到 Docker MySQL，
+适合自己掌控数据、上下文和成本的长期使用。
 
-Go 后端 + Vue 3 前端，前端产物嵌入单个可执行文件，只监听本机 `127.0.0.1:28888`，
-数据存在本地 SQLite 里。
+Go 后端 + Vue 3 前端，前端产物嵌入单个可执行文件，默认只监听本机 `127.0.0.1:28888`。
 
 
 - 左侧对话历史，右侧对话内容；长会话**向上滚动分页加载**更早的消息，首屏只取最近若干条
@@ -39,6 +38,7 @@ Go 后端 + Vue 3 前端，前端产物嵌入单个可执行文件，只监听�
 - **可以配任意多个供应商**，每个会话绑定其中一个；模型选择器按供应商分组
 - **支持贴图**（Ctrl+V / 拖拽 / 选文件），列表只加载缩略图、点开才看大图
 - 设置里点「获取模型列表」自动拉取模型，不用手写 model id
+- **按用户的模型可达性检测**：管理员在用户管理中开启后，每分钟向该用户每个模型发送一次「测试」；模型下拉用绿色 / 红色 / 灰色区分正常、失败和等待检测
 - 输入框右下角切换**模型**和**思考强度**
 - `Enter` 发送，`Ctrl+Enter` / `Shift+Enter` 换行（中文输入法选词时不会误发）
 - **完整 CoT 流式刷新显示**，刷新页面不丢、可续传；CoT 也能**编辑 / 还原**
@@ -121,9 +121,14 @@ go build -o ai-assistant.exe .
 |---|---|---|
 | `-addr` | `127.0.0.1:28888` | 监听地址。默认只绑本机；改成 `0.0.0.0:28888` 才会对局域网开放 |
 | `-data` | `data` | 数据目录，SQLite 文件放在这里 |
+| `-mysql-dsn` | `MYSQL_DSN` 环境变量 | 设置后使用 MySQL；留空使用 SQLite。DSN 含账号密码，优先用环境变量 |
+| `-migrate-sqlite` | 空 | 将指定 SQLite 主库与 misc/memory 记忆记录迁到空 MySQL 后退出 |
+| `-migrate-memory-only` | `false` | 只迁移 misc/memory 下的 SQLite 记忆记录后退出 |
 | `-misc` | `misc` | **附件目录**，上传的图片和文档放这里。和 `-data` 分开，方便各挂各的卷 |
 | `-token` | 空 | 访问令牌。留空不鉴权；填 `auto` 自动生成并打印可用的手机访问地址 |
-| `-searxng` | 空 | SearXNG 地址（如 `http://127.0.0.1:18084`）。配置后开启联网搜索：会话上会出现「联网」开关，模型通过 function calling 自主调用 `web_search`。留空则完全没有这个功能 |
+| `-tavily-key` | `TAVILY_API_KEY` 环境变量 | Tavily API Key。配置后开启 `web_search_tavily`，优先使用环境变量，避免 key 留在 shell 历史中 |
+| `-serper-key` | `SERPER_API_KEY` 环境变量 | Serper API Key。配置后通过 Serper 开启 Google 搜索工具 `web_search_google`，优先使用环境变量 |
+| `-searxng` | 空 | SearXNG 地址（如 `http://127.0.0.1:18084`）。只在未配置 Tavily 和 Serper 时启用原 `web_search`，作为自托管备选 |
 | `-pybox` | 空 | Python 沙箱地址（如 `http://pybox:8000`）。配置后开启 `run_python` 和 `read_file`（全局可用，无开关，模型自主判断用不用）。沙箱镜像是 `Dockerfile.pybox`；断网、只读和资源限额须由部署方式另行保证 |
 | `-imagegen` | `IMAGEGEN` 环境变量 | 图像生成：格式 `base_url\|api_key\|model`（model 可省，默认 `Tongyi-MAI/Z-Image-Turbo`），如 `https://api.siliconflow.cn\|sk-xxx\|Kwai-Kolors/Kolors`。配置后模型可自主调用 `generate_image`。优先使用环境变量，避免 key 留在 shell 历史中 |
 | `-compact-threshold` | `0.7` | 上下文提示阈值（0~1）：进度超过这个比例时变红并建议手动压缩。压缩本身是**手动触发**（会话窗口右上角按钮），这个参数只控制提示；`0` = 不提示 |
@@ -149,7 +154,9 @@ go build -o ai-assistant.exe .
 
 其他几个细节：
 
-- **按内容哈希去重**：同一张图传两次只占一份磁盘、只有一条记录；文件名就是 sha256，
+- **按会话归档**：新图片保存为 `misc/images/<会话ID>/<图片ID>.<扩展名>`，缩略图和发送版也在同目录；
+  尚未绑定会话的上传先放 `misc/images/unassigned`。旧哈希目录会在启动时自动迁移，分叉共享的附件不复制。
+- **按内容哈希去重**：同一张图传两次只占一份磁盘、只有一条附件记录；附件内容不变，
   所以响应头可以放心地设 `immutable` 长缓存，第二次打开直接走浏览器缓存。
 - **上传时生成缩略图，并按需生成发送版**：手机照片动辄 4000px，发送版可为超大原图提供
   体积更小的兜底。但发给模型的**优先是原图**（≤10 MiB 直接发，细节最全；超了才退回 1024
@@ -253,26 +260,29 @@ docker run -d --name ai-assistant \
 
 ### 联网搜索（可选）
 
-搜索后端用自托管 [SearXNG](https://github.com/searxng/searxng)（元搜索，零 API 成本）。
-两个容器放进同一个 docker 网络即可：
+推荐使用托管搜索 API。配置 `TAVILY_API_KEY` 和 `SERPER_API_KEY` 后会提供两个独立工具：
+`web_search_tavily` 用于常规搜索，`web_search_google` 通过 Serper 使用 Google，适合精确、
+长尾搜索或补充 Tavily 的结果。模型根据工具说明自行选择，只配置其中一个 Key 也可以。
 
 ```bash
-docker network create ai-net
-docker run -d --name searxng --network ai-net -v /srv/searxng:/etc/searxng:ro searxng/searxng:latest
-docker run -d --name ai-assistant --network ai-net \
+export TAVILY_API_KEY='你的 Tavily Key'
+export SERPER_API_KEY='你的 Serper Key'
+docker run -d --name ai-assistant \
+  -e TAVILY_API_KEY -e SERPER_API_KEY \
   -p 127.0.0.1:28888:28888 \
   -v /srv/ai-assistant/data:/app/data \
   -v /srv/ai-assistant/misc:/app/misc \
-  ai-assistant:latest -addr 0.0.0.0:28888 -searxng http://searxng:8080
+  ai-assistant:latest -addr 0.0.0.0:28888
 ```
 
-SearXNG 的 `settings.yml` 里要把 `search.formats` 加上 `json`（默认只出 HTML），
-并按网络环境裁剪引擎列表（国内服务器建议只保留搜狗 / 360 等可达引擎，
-百度对机房 IP 弹验证码）。不配 `-searxng` 时应用照常工作，只是没有「联网」开关。
+两个 Key 都没配置时，可以用自托管 [SearXNG](https://github.com/searxng/searxng) 作为备选。
+两个容器放进同一个 docker 网络，并给应用加 `-searxng http://searxng:8080` 即可；
+SearXNG 的 `settings.yml` 要把 `search.formats` 加上 `json`（默认只出 HTML）。
+这条兼容路径只提供原 `web_search` 工具。
 
-工作方式：会话开了「联网」后，模型生成中可自主调用 `web_search`（function calling，
+工作方式：会话开了「联网」后，模型生成中可自主调用搜索工具（function calling，
 所有工具共用最多 8 轮熔断）。tool 交互只活在当轮内存里，落库的是最终正文和一份搜索摘要
-（关键词 + 来源链接，消息上可展开查看）。上游不支持 tools 参数时自动降级为普通生成。
+（搜索后端 + 关键词 + 来源链接，消息上可展开查看）。上游不支持 tools 参数时自动降级为普通生成。
 
 ### Python 代码执行（可选）
 
@@ -297,17 +307,23 @@ PDF 默认提取文本并报告总页数；模型可对扫描件或复杂版面�
 
 ## 数据与备份
 
+默认 SQLite 布局：
+
 ```
-data/ai-assistant.db        会话、消息、CoT、模型列表、供应商配置（含 API Key）都在这个文件里
+data/ai-assistant.db        会话、消息、CoT、模型列表、供应商配置（含 API Key）
 data/ai-assistant.db-wal    WAL 日志
-misc/images/<hash 前2位>/  上传的图片：原图 + .thumb.jpg（缩略图）+ 按需生成的 .send.jpg（发送版）
+misc/images/<会话ID>/       图片原图、缩略图和按需生成的发送版，文件名为图片 ID
+misc/images/unassigned/   已上传但尚未绑定会话的图片
 misc/files/               上传的文档：按内容 sha256 命名，read_file 在沙箱中按需提取文本
 ```
 
-备份就是把 `data/` 和 `misc/` 两个目录都复制走。注意 **API Key 是明文存在 SQLite 里的**——
-这是本地单用户工具的取舍。
-服务默认只绑 `127.0.0.1`，不限制访问 Host，并校验 Origin 拒绝跨源请求；
-但仍然不要把这份数据库提交到任何仓库。
+设置 `MYSQL_DSN` 后主库使用 MySQL，记忆记录进入同一数据库的 `memory_*` 表；图片、文档和记忆正文
+仍在 misc 文件树。可用 `-migrate-sqlite <旧库路径>` 一次性迁移，目标 MySQL 必须为空；
+`-migrate-memory-only` 用于只补迁记忆记录。SQLite 原库不会自动删除，可作为回滚副本。
+
+`-backup-dir` 启用启动时 + 每小时一致性备份，保留最新 24 份：SQLite 生成 `.db`，MySQL 生成可导入的
+`.sql`（含记忆表）。附件目录需要另行备份。**API Key 在数据库中是明文**，备份同样敏感，
+不要提交到仓库或暴露给不可信设备。MySQL 远程查看应使用仅授权业务库的独立账号，不要开放 root。
 
 ---
 
@@ -321,7 +337,7 @@ misc/files/               上传的文档：按内容 sha256 命名，read_file 
 **独占**该会话的全部可变状态（当前生成、累积的 CoT/正文、会话配置）。命令通过 mailbox 串行投递，
 所以会话内部**没有锁、没有竞态**；不同会话之间天然并行，可以同时生成。
 
-会话 goroutine 空闲 5 分钟且不在生成时会自行退出，状态本来就在 SQLite 里，下一条命令会把它原样重建——
+会话 goroutine 空闲 5 分钟且不在生成时会自行退出，状态本来就在数据库里，下一条命令会把它原样重建——
 所以「一个会话一个 goroutine」不会随会话数无限堆积。
 
 ### 2. 前后端只有一条 SSE 长连接
@@ -346,13 +362,14 @@ misc/files/               上传的文档：按内容 sha256 命名，read_file 
 
 ```
 main.go                     启动、embed 前端、优雅退出
-internal/store/             SQLite（纯 Go 驱动 modernc.org/sqlite，无需 CGO）
+internal/store/             SQLite / MySQL、SQL 方言兼容、迁移与一致性备份
 internal/llm/               OpenAI 兼容协议：流式解析、模型列表、思考强度映射
 internal/session/           Manager + 每会话 actor + 全局事件总线 + 上下文压缩（compact.go）
 internal/httpapi/           路由、SSE 写出、命令接口、静态资源、图片/文档上传
-internal/media/             图片存储：原图 + 缩略图 + 发送版，按内容哈希去重
+internal/media/             图片存储：会话目录、原图 + 缩略图 + 发送版、内容去重与旧路径迁移
 internal/imagegen/          generate_image 工具的上游客户端（图像生成 API）
-internal/search/            web_search 工具（自托管 SearXNG）
+internal/search/            Tavily / Serper / SearXNG 搜索工具
+internal/modelcheck/        按用户每分钟模型可达性检测与内存状态
 internal/sandbox/           run_python / read_file 的 pybox 沙箱客户端
 tools/mockllm/              假上游，用于本地端到端测试
 tools/e2e-test.ps1          端到端测试脚本

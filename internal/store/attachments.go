@@ -13,7 +13,7 @@ type Attachment struct {
 	// UserID 首个上传者（哈希去重下后来的上传者复用同一行；
 	// 读取校验用 GetAttachmentForUser：属主或「挂在本人会话消息上」都算可见）
 	UserID int64  `json:"-"`
-	Hash   string `json:"-"` // 内容 sha256，同时是文件名
+	Hash   string `json:"-"` // 内容 sha256，用于去重与缓存校验；新文件以附件 ID 命名
 	Kind   string `json:"kind"`
 	MIME   string `json:"mime"`
 	Ext    string `json:"-"`
@@ -113,6 +113,36 @@ func (s *Store) GetAttachmentByHash(hash string) (*Attachment, error) {
 		return nil, nil
 	}
 	return a, err
+}
+
+// AttachmentStorage 是启动时迁移旧图片所需的最小存储信息。
+type AttachmentStorage struct {
+	ID     int64
+	ConvID int64
+	Hash   string
+	Ext    string
+}
+
+// ListAttachmentStorage 返回全部图片及其最早关联的会话；未挂载图片的 ConvID 为 0。
+func (s *Store) ListAttachmentStorage() ([]AttachmentStorage, error) {
+	rows, err := s.db.Query(`SELECT a.id, COALESCE(MIN(m.conv_id), 0), a.hash, a.ext
+		FROM attachments a
+		LEFT JOIN message_attachments ma ON ma.attachment_id = a.id
+		LEFT JOIN messages m ON m.id = ma.message_id
+		GROUP BY a.id, a.hash, a.ext ORDER BY a.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []AttachmentStorage{}
+	for rows.Next() {
+		var item AttachmentStorage
+		if err := rows.Scan(&item.ID, &item.ConvID, &item.Hash, &item.Ext); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 // AttachToMessage 把若干附件挂到一条消息上，顺序按传入顺序记录。

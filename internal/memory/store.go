@@ -56,6 +56,8 @@ type userStore struct {
 	userID    int64
 	root      string
 	db        *sql.DB
+	mysql     bool
+	shared    bool
 	archiveMu sync.Mutex
 }
 
@@ -88,7 +90,25 @@ func openUserStore(root string, userID int64) (*userStore, error) {
 	return u, nil
 }
 
+func openUserStoreMySQL(db *sql.DB, root string, userID int64) (*userStore, error) {
+	if userID <= 0 {
+		return nil, fmt.Errorf("非法用户 id")
+	}
+	dir := filepath.Join(root, "users", strconv.FormatInt(userID, 10))
+	if err := os.MkdirAll(filepath.Join(dir, ".staging"), 0o700); err != nil {
+		return nil, err
+	}
+	u := &userStore{userID: userID, root: dir, db: db, mysql: true, shared: true}
+	if err := u.migrate(); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
 func (u *userStore) migrate() error {
+	if u.mysql {
+		return u.migrateMySQL()
+	}
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT NOT NULL DEFAULT '')`,
 		`CREATE TABLE IF NOT EXISTS maintenance (k TEXT PRIMARY KEY, v TEXT NOT NULL DEFAULT '')`,
@@ -113,15 +133,62 @@ func (u *userStore) migrate() error {
 	return nil
 }
 
-func (u *userStore) close() error { return u.db.Close() }
+func (u *userStore) migrateMySQL() error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS memory_settings (
+			user_id BIGINT NOT NULL, k VARCHAR(191) NOT NULL, v TEXT NOT NULL DEFAULT (''),
+			PRIMARY KEY(user_id,k)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE IF NOT EXISTS memory_maintenance (
+			user_id BIGINT NOT NULL, k VARCHAR(191) NOT NULL, v TEXT NOT NULL DEFAULT (''),
+			PRIMARY KEY(user_id,k)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+		`CREATE TABLE IF NOT EXISTS memory_session_states (
+			user_id BIGINT NOT NULL,
+			conv_id BIGINT NOT NULL,
+			enabled BIGINT NOT NULL DEFAULT 0,
+			status VARCHAR(32) NOT NULL DEFAULT 'pending',
+			archived_before BIGINT NOT NULL DEFAULT 0,
+			archived_at BIGINT NOT NULL DEFAULT 0,
+			last_error TEXT NOT NULL DEFAULT (''),
+			archive_path TEXT NOT NULL DEFAULT (''),
+			archive_hash TEXT NOT NULL DEFAULT (''),
+			source_fingerprint TEXT NOT NULL DEFAULT (''),
+			index_card LONGTEXT NOT NULL DEFAULT (''),
+			PRIMARY KEY(user_id,conv_id)
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+	}
+	for _, q := range stmts {
+		if _, err := u.db.Exec(q); err != nil {
+			return fmt.Errorf("初始化 MySQL 记忆表失败: %w", err)
+		}
+	}
+	return nil
+}
+
+func (u *userStore) close() error {
+	if u.shared {
+		return nil
+	}
+	return u.db.Close()
+}
 
 func (u *userStore) setting(key string) string {
 	var v string
-	_ = u.db.QueryRow(`SELECT v FROM settings WHERE k = ?`, key).Scan(&v)
+	if u.mysql {
+		_ = u.db.QueryRow(`SELECT v FROM memory_settings WHERE user_id=? AND k=?`, u.userID, key).Scan(&v)
+	} else {
+		_ = u.db.QueryRow(`SELECT v FROM settings WHERE k = ?`, key).Scan(&v)
+	}
 	return v
 }
 
 func (u *userStore) setSetting(key, value string) error {
+	if u.mysql {
+		_, err := u.db.Exec(`INSERT INTO memory_settings(user_id,k,v) VALUES(?,?,?)
+			ON DUPLICATE KEY UPDATE v=VALUES(v)`, u.userID, key, value)
+		return err
+	}
 	_, err := u.db.Exec(`INSERT INTO settings(k,v) VALUES(?,?)
 		ON CONFLICT(k) DO UPDATE SET v=excluded.v`, key, value)
 	return err
@@ -157,8 +224,15 @@ func (u *userStore) setBackground(v BackgroundSettings) error {
 func (u *userStore) session(convID int64) (*sessionRecord, error) {
 	var r sessionRecord
 	var enabled int
-	err := u.db.QueryRow(`SELECT conv_id,enabled,status,archived_before,archived_at,last_error,
-		archive_path,archive_hash,source_fingerprint,index_card FROM session_states WHERE conv_id = ?`, convID).
+	query := `SELECT conv_id,enabled,status,archived_before,archived_at,last_error,
+		archive_path,archive_hash,source_fingerprint,index_card FROM session_states WHERE conv_id = ?`
+	args := []any{convID}
+	if u.mysql {
+		query = `SELECT conv_id,enabled,status,archived_before,archived_at,last_error,
+			archive_path,archive_hash,source_fingerprint,index_card FROM memory_session_states WHERE user_id=? AND conv_id=?`
+		args = []any{u.userID, convID}
+	}
+	err := u.db.QueryRow(query, args...).
 		Scan(&r.ConvID, &enabled, &r.Status, &r.ArchivedBefore, &r.ArchivedAt, &r.LastError,
 			&r.ArchivePath, &r.ArchiveHash, &r.SourceFingerprint, &r.IndexCard)
 	if err == sql.ErrNoRows {
@@ -172,8 +246,15 @@ func (u *userStore) session(convID int64) (*sessionRecord, error) {
 }
 
 func (u *userStore) sessions() ([]sessionRecord, error) {
-	rows, err := u.db.Query(`SELECT conv_id,enabled,status,archived_before,archived_at,last_error,
-		archive_path,archive_hash,source_fingerprint,index_card FROM session_states ORDER BY conv_id`)
+	query := `SELECT conv_id,enabled,status,archived_before,archived_at,last_error,
+		archive_path,archive_hash,source_fingerprint,index_card FROM session_states ORDER BY conv_id`
+	args := []any{}
+	if u.mysql {
+		query = `SELECT conv_id,enabled,status,archived_before,archived_at,last_error,
+			archive_path,archive_hash,source_fingerprint,index_card FROM memory_session_states WHERE user_id=? ORDER BY conv_id`
+		args = append(args, u.userID)
+	}
+	rows, err := u.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -193,6 +274,13 @@ func (u *userStore) sessions() ([]sessionRecord, error) {
 }
 
 func (u *userStore) setEnabled(convID int64, enabled bool) error {
+	if u.mysql {
+		_, err := u.db.Exec(`INSERT INTO memory_session_states(user_id,conv_id,enabled,status) VALUES(?,?,?,'pending')
+			ON DUPLICATE KEY UPDATE enabled=VALUES(enabled),
+			status=CASE WHEN VALUES(enabled)=1 AND memory_session_states.status='disabled' THEN 'pending' ELSE memory_session_states.status END`,
+			u.userID, convID, boolInt(enabled))
+		return err
+	}
 	_, err := u.db.Exec(`INSERT INTO session_states(conv_id,enabled,status) VALUES(?,?,'pending')
 		ON CONFLICT(conv_id) DO UPDATE SET enabled=excluded.enabled,
 		status=CASE WHEN excluded.enabled=1 AND session_states.status='disabled' THEN 'pending' ELSE session_states.status END`,
@@ -201,11 +289,21 @@ func (u *userStore) setEnabled(convID int64, enabled bool) error {
 }
 
 func (u *userStore) markError(convID int64, message string) error {
+	if u.mysql {
+		_, err := u.db.Exec(`UPDATE memory_session_states SET status='error',last_error=? WHERE user_id=? AND conv_id=?`, message, u.userID, convID)
+		return err
+	}
 	_, err := u.db.Exec(`UPDATE session_states SET status='error',last_error=? WHERE conv_id=?`, message, convID)
 	return err
 }
 
 func (u *userStore) saveArchive(r *sessionRecord) error {
+	if u.mysql {
+		_, err := u.db.Exec(`UPDATE memory_session_states SET status='done',archived_before=?,archived_at=?,last_error='',
+			archive_path=?,archive_hash=?,source_fingerprint=?,index_card=? WHERE user_id=? AND conv_id=?`,
+			r.ArchivedBefore, r.ArchivedAt, r.ArchivePath, r.ArchiveHash, r.SourceFingerprint, r.IndexCard, u.userID, r.ConvID)
+		return err
+	}
 	_, err := u.db.Exec(`UPDATE session_states SET status='done',archived_before=?,archived_at=?,last_error='',
 		archive_path=?,archive_hash=?,source_fingerprint=?,index_card=? WHERE conv_id=?`,
 		r.ArchivedBefore, r.ArchivedAt, r.ArchivePath, r.ArchiveHash, r.SourceFingerprint, r.IndexCard, r.ConvID)
@@ -213,29 +311,44 @@ func (u *userStore) saveArchive(r *sessionRecord) error {
 }
 
 func (u *userStore) updateArchiveHash(convID int64, hash string) error {
+	if u.mysql {
+		_, err := u.db.Exec(`UPDATE memory_session_states SET archive_hash=? WHERE user_id=? AND conv_id=?`, hash, u.userID, convID)
+		return err
+	}
 	_, err := u.db.Exec(`UPDATE session_states SET archive_hash=? WHERE conv_id=?`, hash, convID)
 	return err
 }
 
 func (u *userStore) deleteSession(convID int64) error {
+	if u.mysql {
+		_, err := u.db.Exec(`DELETE FROM memory_session_states WHERE user_id=? AND conv_id=?`, u.userID, convID)
+		return err
+	}
 	_, err := u.db.Exec(`DELETE FROM session_states WHERE conv_id=?`, convID)
 	return err
 }
 
 func (u *userStore) maintenanceValue(key string) int64 {
-	var raw string
-	_ = u.db.QueryRow(`SELECT v FROM maintenance WHERE k=?`, key).Scan(&raw)
-	n, _ := strconv.ParseInt(raw, 10, 64)
+	n, _ := strconv.ParseInt(u.maintenanceText(key), 10, 64)
 	return n
 }
 
 func (u *userStore) maintenanceText(key string) string {
 	var raw string
-	_ = u.db.QueryRow(`SELECT v FROM maintenance WHERE k=?`, key).Scan(&raw)
+	if u.mysql {
+		_ = u.db.QueryRow(`SELECT v FROM memory_maintenance WHERE user_id=? AND k=?`, u.userID, key).Scan(&raw)
+	} else {
+		_ = u.db.QueryRow(`SELECT v FROM maintenance WHERE k=?`, key).Scan(&raw)
+	}
 	return raw
 }
 
 func (u *userStore) setMaintenance(key, value string) error {
+	if u.mysql {
+		_, err := u.db.Exec(`INSERT INTO memory_maintenance(user_id,k,v) VALUES(?,?,?)
+			ON DUPLICATE KEY UPDATE v=VALUES(v)`, u.userID, key, value)
+		return err
+	}
 	_, err := u.db.Exec(`INSERT INTO maintenance(k,v) VALUES(?,?)
 		ON CONFLICT(k) DO UPDATE SET v=excluded.v`, key, value)
 	return err

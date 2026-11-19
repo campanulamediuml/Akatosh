@@ -24,7 +24,7 @@ const (
 	flushInterval = 250 * time.Millisecond
 
 	// idleTimeout：空闲这么久且没有在生成，会话 goroutine 就自行退出。
-	// 状态本来就在 SQLite 里，下一条命令会把它原样重建，
+	// 状态本来就在数据库里，下一条命令会把它原样重建，
 	// 所以「一个会话一个 goroutine」不会随着会话数无上限地堆积。
 	idleTimeout = 5 * time.Minute
 	idleCheck   = 20 * time.Second
@@ -406,6 +406,13 @@ func (s *Session) handleSend(cmd command) (result, error) {
 			log.Printf("[session %d] 附件挂载失败（消息仍会发出，但不带图）: %v", s.convID, err)
 		} else if full, err := s.mgr.st.GetMessageWithAttachments(userMsg.ID); err == nil && full != nil {
 			userMsg = full
+			if s.mgr.media != nil {
+				for _, att := range full.Attachments {
+					if err := s.mgr.media.BindToConversation(att.ID, s.convID, att.Hash, att.Ext); err != nil {
+						log.Printf("[media] 图片 %d 绑定到会话 %d 失败，保留原路径: %v", att.ID, s.convID, err)
+					}
+				}
+			}
 		}
 	}
 	// 把这一轮带的文件挂上去（id 是 /api/files 返回的，同样的归属校验）
@@ -1344,7 +1351,6 @@ func applyReasoningPolicy(msgs []llm.ChatMessage, withTools bool) {
 }
 
 // attachGeneratedImage 把生成的图片落到附件库并挂到消息上，返回附件 id。
-// media.Save 内部按内容哈希去重（同一张图只占一份磁盘），缩略图/发送版一并生成。
 func (s *Session) attachGeneratedImage(msgID int64, img []byte) (int64, error) {
 	if s.mgr.media == nil {
 		return 0, fmt.Errorf("没有配置 misc 目录")
@@ -1353,7 +1359,18 @@ func (s *Session) attachGeneratedImage(msgID int64, img []byte) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	prev, err := s.mgr.st.GetAttachmentByHash(saved.Hash)
+	if err != nil {
+		return 0, err
+	}
+	if prev != nil {
+		if !saved.Reused {
+			_ = s.mgr.media.Remove(saved.Hash, saved.Ext)
+		}
+		return prev.ID, s.mgr.st.AttachToMessage(msgID, []int64{prev.ID})
+	}
 	att, err := s.mgr.st.CreateAttachment(store.Attachment{
+		UserID: s.ownerID(),
 		Hash:   saved.Hash,
 		Kind:   "image",
 		MIME:   saved.MIME,
@@ -1365,6 +1382,9 @@ func (s *Session) attachGeneratedImage(msgID int64, img []byte) (int64, error) {
 	})
 	if err != nil {
 		return 0, err
+	}
+	if err := s.mgr.media.Place(att.ID, s.convID, saved.Hash, saved.Ext); err != nil {
+		log.Printf("[media] 生成图片 %d 移到会话 %d 失败，保留旧路径: %v", att.ID, s.convID, err)
 	}
 	return att.ID, s.mgr.st.AttachToMessage(msgID, []int64{att.ID})
 }
@@ -1395,7 +1415,7 @@ func (s *Session) imageDataURL(a store.Attachment) (string, int, error) {
 const maxRawImageBytes = 10 << 20
 
 func (s *Session) readOriginalOrSend(a store.Attachment) ([]byte, string, error) {
-	b, err := os.ReadFile(s.mgr.media.OriginalPath(a.Hash, a.Ext))
+	b, err := os.ReadFile(s.mgr.media.OriginalPathByID(a.ID, a.Hash, a.Ext))
 	if err != nil {
 		return nil, "", err
 	}
@@ -1407,7 +1427,7 @@ func (s *Session) readOriginalOrSend(a store.Attachment) ([]byte, string, error)
 		return b, mime, nil
 	}
 	// 原图太大：退回发送版（≤1024 的 JPEG）
-	return s.mgr.media.OpenForModel(a.Hash, a.Ext, a.MIME)
+	return s.mgr.media.OpenForModelByID(a.ID, a.Hash, a.Ext, a.MIME)
 }
 
 func hasUserMessage(msgs []llm.ChatMessage) bool {

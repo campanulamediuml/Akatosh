@@ -19,6 +19,7 @@ import (
 
 	"aiassistant/internal/llm"
 	"aiassistant/internal/media"
+	"aiassistant/internal/modelcheck"
 	"aiassistant/internal/session"
 	"aiassistant/internal/store"
 )
@@ -33,6 +34,8 @@ type Server struct {
 	media *media.Store
 	// filesDir 是上传文档的存放目录（misc/files）；空 = 不启用文件上传
 	filesDir string
+	// modelHealth 保存按用户隔离的模型检测结果。
+	modelHealth *modelcheck.Manager
 
 	// exposed 为 true 表示用户把服务绑到了非回环地址（主动对外提供访问）。
 	exposed bool
@@ -50,6 +53,10 @@ type Option func(*Server)
 // WithFilesDir 设置上传文档的存放目录（misc/files）。
 func WithFilesDir(dir string) Option {
 	return func(s *Server) { s.filesDir = dir }
+}
+
+func WithModelHealth(manager *modelcheck.Manager) Option {
+	return func(s *Server) { s.modelHealth = manager }
 }
 
 func New(st *store.Store, mgr *session.Manager, web fs.FS, version, bindAddr string, mediaStore *media.Store, opts ...Option) *Server {
@@ -106,6 +113,9 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/providers/{id}/models/fetch", s.handleFetchModels)
 	m.HandleFunc("POST /api/providers/{id}/test", s.handleTestProvider)
 	m.HandleFunc("GET /api/models", s.handleListModels)
+	m.HandleFunc("GET /api/model-health", s.handleGetModelHealth)
+	m.HandleFunc("GET /api/model-health/concurrency", s.handleGetModelHealthConcurrency)
+	m.HandleFunc("PUT /api/model-health/concurrency", s.handlePutModelHealthConcurrency)
 
 	// 会话内全文搜索（当前用户隔离）
 	m.HandleFunc("GET /api/search/messages", s.handleSearchMessages)
@@ -142,6 +152,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/users", s.handleListUsers)
 	m.HandleFunc("POST /api/users", s.handleCreateUser)
 	m.HandleFunc("POST /api/users/{id}/token", s.handleRotateUserToken)
+	m.HandleFunc("PUT /api/users/{id}/model-health", s.handlePutUserModelHealth)
 	m.HandleFunc("DELETE /api/users/{id}", s.handleDeleteUser)
 
 	// 附件（图片）

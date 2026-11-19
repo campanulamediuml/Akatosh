@@ -24,6 +24,7 @@ import (
 	"aiassistant/internal/llm"
 	"aiassistant/internal/media"
 	"aiassistant/internal/memory"
+	"aiassistant/internal/modelcheck"
 	"aiassistant/internal/sandbox"
 	"aiassistant/internal/search"
 	"aiassistant/internal/session"
@@ -41,10 +42,15 @@ const version = "1.0.0"
 func main() {
 	addr := flag.String("addr", "127.0.0.1:28888", "监听地址（默认只绑本机；要让手机访问用 -addr 0.0.0.0:28888）")
 	dataDir := flag.String("data", "data", "数据目录，存放 sqlite 数据库")
-	backupDir := flag.String("backup-dir", "", "SQLite 一致性备份目录：启动后立即备份，此后每小时滚存 24 份；留空禁用")
+	mysqlDSN := flag.String("mysql-dsn", strings.TrimSpace(os.Getenv("MYSQL_DSN")), "MySQL DSN（默认读 MYSQL_DSN）；设置后使用 MySQL，留空使用 SQLite")
+	migrateSQLite := flag.String("migrate-sqlite", "", "把指定 SQLite 主库迁移到空 MySQL 后退出（需同时设置 -mysql-dsn）")
+	migrateMemoryOnly := flag.Bool("migrate-memory-only", false, "只迁移 misc/memory 下的 SQLite 记忆记录后退出")
+	backupDir := flag.String("backup-dir", "", "一致性备份目录：启动后立即备份，此后每小时滚存 24 份；留空禁用")
 	miscDir := flag.String("misc", "misc", "附件目录，存放上传的图片（Docker 部署时可以单独挂载）")
 	tokenFlag := flag.String("token", "", "访问令牌：留空不鉴权，填 auto 自动生成并打印。手机访问时强烈建议设置")
-	searxngFlag := flag.String("searxng", "", "SearXNG 地址（如 http://searxng:8080）：配置后开启联网搜索（function calling）；留空禁用")
+	searxngFlag := flag.String("searxng", "", "SearXNG 地址（如 http://searxng:8080）：未配置托管搜索时开启原 web_search 工具；留空禁用")
+	tavilyKey := flag.String("tavily-key", strings.TrimSpace(os.Getenv("TAVILY_API_KEY")), "Tavily API Key（默认读 TAVILY_API_KEY）：开启 web_search_tavily 工具")
+	serperKey := flag.String("serper-key", strings.TrimSpace(os.Getenv("SERPER_API_KEY")), "Serper API Key（默认读 SERPER_API_KEY）：开启 Google 搜索工具")
 	pyboxFlag := flag.String("pybox", "", "Python 沙箱地址（如 http://pybox:8000）：配置后开启 run_python 代码执行工具；留空禁用")
 	imagegenFlag := flag.String("imagegen", strings.TrimSpace(os.Getenv("IMAGEGEN")), "图像生成：格式 base_url|api_key|model，默认读取 IMAGEGEN 环境变量（model 可省，默认 Tongyi-MAI/Z-Image-Turbo）")
 	compactFlag := flag.Float64("compact-threshold", 0.7, "上下文提示阈值（0~1）：进度条超过这个比例时变红并建议手动压缩（压缩本身是手动触发，见会话窗口右上角按钮；0 = 不提示）")
@@ -63,7 +69,49 @@ func main() {
 	}
 
 	dbPath := filepath.Join(*dataDir, "ai-assistant.db")
-	st, err := store.Open(dbPath)
+	var st *store.Store
+	var err error
+	if *migrateMemoryOnly {
+		if strings.TrimSpace(*mysqlDSN) == "" {
+			log.Fatal("-migrate-memory-only 需要同时设置 -mysql-dsn 或 MYSQL_DSN")
+		}
+		st, err = store.OpenMySQL(*mysqlDSN)
+		if err != nil {
+			log.Fatalf("连接记忆迁移目标失败: %v", err)
+		}
+		if err := memory.MigrateSQLiteToMySQL(st, filepath.Join(*miscDir, "memory")); err != nil {
+			st.Close()
+			log.Fatalf("迁移记忆记录失败: %v", err)
+		}
+		st.Close()
+		log.Printf("SQLite 记忆记录已成功迁移到 MySQL")
+		return
+	}
+	if *migrateSQLite != "" {
+		if strings.TrimSpace(*mysqlDSN) == "" {
+			log.Fatal("-migrate-sqlite 需要同时设置 -mysql-dsn 或 MYSQL_DSN")
+		}
+		st, err = store.OpenMySQL(*mysqlDSN)
+		if err != nil {
+			log.Fatalf("连接迁移目标失败: %v", err)
+		}
+		if err := store.MigrateSQLiteToMySQL(st, *migrateSQLite); err != nil {
+			st.Close()
+			log.Fatalf("迁移主库失败: %v", err)
+		}
+		if err := memory.MigrateSQLiteToMySQL(st, filepath.Join(*miscDir, "memory")); err != nil {
+			st.Close()
+			log.Fatalf("迁移记忆记录失败: %v", err)
+		}
+		st.Close()
+		log.Printf("SQLite 主库与记忆记录已成功迁移到 MySQL")
+		return
+	}
+	if strings.TrimSpace(*mysqlDSN) != "" {
+		st, err = store.OpenMySQL(*mysqlDSN)
+	} else {
+		st, err = store.Open(dbPath)
+	}
 	if err != nil {
 		log.Fatalf("打开数据库失败: %v", err)
 	}
@@ -80,6 +128,19 @@ func main() {
 	mediaStore, err := media.NewStore(*miscDir)
 	if err != nil {
 		log.Fatalf("初始化附件目录失败: %v", err)
+	}
+	storageRows, err := st.ListAttachmentStorage()
+	if err != nil {
+		log.Fatalf("读取旧图片存储信息失败: %v", err)
+	}
+	legacyImages := make([]media.LegacyImage, 0, len(storageRows))
+	for _, row := range storageRows {
+		legacyImages = append(legacyImages, media.LegacyImage{ID: row.ID, ConvID: row.ConvID, Hash: row.Hash, Ext: row.Ext})
+	}
+	if n, err := mediaStore.MigrateLegacy(legacyImages); err != nil {
+		log.Printf("[media] 已迁移 %d 张旧图片，部分文件迁移失败（旧路径仍可读取）: %v", n, err)
+	} else if n > 0 {
+		log.Printf("[media] 已将 %d 张旧图片迁移到会话目录", n)
 	}
 	tempDir := filepath.Join(*miscDir, "tmp")
 	if err := os.MkdirAll(tempDir, 0o700); err != nil {
@@ -135,10 +196,23 @@ func main() {
 		return llm.New(p.BaseURL, p.APIKey), nil
 	}, mediaStore).WithMemory(memoryManager)
 
-	// 联网搜索（function calling）：配了 -searxng 才启用
-	if sx := strings.TrimSpace(*searxngFlag); sx != "" {
-		mgr.WithSearch(search.New(sx))
-		log.Printf("  联网搜索 : %s（会话级开关，function calling）", sx)
+	// 托管搜索优先：两个工具由模型按需选择。都没配置时才保留原 SearXNG 单工具。
+	managedSearch := false
+	if key := strings.TrimSpace(*tavilyKey); key != "" {
+		mgr.WithSearchProvider(search.NewTavily(key))
+		managedSearch = true
+		log.Printf("  Tavily 搜索 : web_search_tavily（会话级开关，function calling）")
+	}
+	if key := strings.TrimSpace(*serperKey); key != "" {
+		mgr.WithSearchProvider(search.NewGoogle(key))
+		managedSearch = true
+		log.Printf("  Google 搜索 : web_search_google（Serper，会话级开关，function calling）")
+	}
+	if !managedSearch {
+		if sx := strings.TrimSpace(*searxngFlag); sx != "" {
+			mgr.WithSearch(search.New(sx))
+			log.Printf("  联网搜索 : %s（会话级开关，function calling）", sx)
+		}
 	}
 	// Python 代码执行：配了 -pybox 就全局可用（沙箱无副作用，模型自主判断用不用）
 	if pb := strings.TrimSpace(*pyboxFlag); pb != "" {
@@ -181,6 +255,12 @@ func main() {
 		log.Printf("  上下文压缩 : 阈值 %.0f%%（达到后旧历史压为摘要并冻结）", *compactFlag*100)
 	}
 
+	modelHealth := modelcheck.New(st)
+	healthCtx, stopModelHealth := context.WithCancel(context.Background())
+	defer stopModelHealth()
+	go modelHealth.Run(healthCtx)
+	log.Printf("  模型可达性检测 : 用户自行开启，全局 worker 池并发 %d（管理员可调）", modelHealth.Concurrency())
+
 	sub, err := fs.Sub(webDist, "web/dist")
 	if err != nil {
 		log.Fatalf("嵌入的前端资源不可用: %v", err)
@@ -188,6 +268,7 @@ func main() {
 
 	handler := httpapi.New(st, mgr, sub, version, *addr, mediaStore,
 		httpapi.WithFilesDir(filepath.Join(*miscDir, "files")),
+		httpapi.WithModelHealth(modelHealth),
 	)
 	httpServer := &http.Server{
 		Addr:              *addr,
@@ -206,7 +287,11 @@ func main() {
 	abs, _ := filepath.Abs(dbPath)
 	miscAbs, _ := filepath.Abs(*miscDir)
 	log.Printf("AI 助手 %s 已启动", version)
-	log.Printf("  数据文件 : %s", abs)
+	if st.IsMySQL() {
+		log.Printf("  数据库 : MySQL（DSN 已通过 MYSQL_DSN 配置）")
+	} else {
+		log.Printf("  数据文件 : %s", abs)
+	}
 	log.Printf("  附件目录 : %s", miscAbs)
 
 	urls := accessTargets(*addr)

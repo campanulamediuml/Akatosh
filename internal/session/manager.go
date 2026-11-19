@@ -61,6 +61,7 @@ type Store interface {
 	CountAttachmentsOwnedBy(ids []int64, userID int64) (int, error)
 	AttachToMessage(messageID int64, attachmentIDs []int64) error
 	CreateAttachment(a store.Attachment) (*store.Attachment, error)
+	GetAttachmentByHash(hash string) (*store.Attachment, error)
 	GetAttachmentInConv(id, convID int64) (*store.Attachment, error)
 	ListAttachments(messageID int64) ([]store.Attachment, error)
 	AttachmentsByMessageIDs(ids []int64) (map[int64][]store.Attachment, error)
@@ -134,10 +135,10 @@ type Manager struct {
 	tools    *ToolManager
 	// media 是 misc 目录的句柄（图片读写给后端用）；可以为 nil（不带图也能跑）
 	media *media.Store
-	// memory 是每用户独立 sidecar；nil = 不启用记忆功能。
+	// memory 是每用户隔离的记忆存储；nil = 不启用记忆功能。
 	memory *memory.Manager
-	// search 是联网搜索的执行端；nil = 不启用联网搜索（会话上的开关不生效）
-	search *search.Client
+	// searchProviders 按工具名保存搜索后端；空表 = 不启用联网搜索。
+	searchProviders map[string]search.Provider
 	// sandbox 是 Python 代码执行的执行端；nil = 不启用（会话上的开关不生效）
 	sandbox *sandbox.Client
 	// imagegen 是图像生成的执行端；nil = 不启用
@@ -157,13 +158,14 @@ func NewManager(st Store, bus *Bus, cf ClientFactory) *Manager {
 // NewManagerWithMedia 带上图片存储。media 传 nil 表示这个部署不启用图片。
 func NewManagerWithMedia(st Store, bus *Bus, cf ClientFactory, mediaStore *media.Store) *Manager {
 	m := &Manager{
-		sessions:   map[int64]*Session{},
-		st:         st,
-		bus:        bus,
-		clientFn:   cf,
-		tools:      newToolManager(),
-		media:      mediaStore,
-		compacting: map[int64]bool{},
+		sessions:        map[int64]*Session{},
+		st:              st,
+		bus:             bus,
+		clientFn:        cf,
+		tools:           newToolManager(),
+		media:           mediaStore,
+		searchProviders: map[string]search.Provider{},
+		compacting:      map[int64]bool{},
 	}
 	// 起标题是后台小任务，不走会话 mailbox，避免占住会话 goroutine
 	m.titler = NewTitler(st, bus, m.ActiveByConv)
@@ -177,14 +179,46 @@ func (m *Manager) WithMemory(v *memory.Manager) *Manager {
 
 func (m *Manager) Memory() *memory.Manager { return m.memory }
 
-// WithSearch 注入联网搜索的执行端（SearXNG）。nil = 这个部署不启用联网搜索。
+// WithSearch 注入原 SearXNG 单工具后端。nil = 禁用它。
 func (m *Manager) WithSearch(c *search.Client) *Manager {
-	m.search = c
+	if c == nil {
+		delete(m.searchProviders, search.ToolName)
+		return m
+	}
+	m.searchProviders[search.ToolName] = search.LegacyProvider(c)
 	return m
 }
 
+// WithSearchProvider 把一个托管搜索后端注册成独立工具。
+func (m *Manager) WithSearchProvider(provider search.Provider) *Manager {
+	name := provider.ToolName
+	m.searchProviders[name] = provider
+	m.tools.Register(ToolRegistration{
+		Name:       name,
+		Definition: provider.ToolDef,
+		Enabled: func(s *Session) bool {
+			return s.conv != nil && s.conv.WebSearch && s.mgr.hasSearch(name)
+		},
+		Label: func(call llm.ToolCall) string {
+			return "正在使用 " + provider.DisplayName + " 搜索：" + search.ParseQuery(call.Function.Arguments)
+		},
+		Call: executeSearchTool,
+	})
+	return m
+}
+
+func (m *Manager) hasSearch(name string) bool {
+	_, ok := m.searchProviders[name]
+	return ok
+}
+
+func (m *Manager) searchProvider(name string) (search.Provider, bool) {
+	provider, ok := m.searchProviders[name]
+	return provider, ok
+}
+
 // SearchAvailable 报告联网搜索是否可用（前端据此显示/隐藏开关）。
-func (m *Manager) SearchAvailable() bool { return m.search != nil }
+func (m *Manager) SearchAvailable() bool { return len(m.searchProviders) > 0 }
 
 // WithSandbox 注入 Python 代码执行的执行端（pybox 沙箱）。nil = 不启用。
 func (m *Manager) WithSandbox(c *sandbox.Client) *Manager {

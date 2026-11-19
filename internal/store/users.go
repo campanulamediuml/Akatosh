@@ -22,6 +22,8 @@ type User struct {
 	IsAdmin    bool   `json:"is_admin"`
 	CreatedAt  int64  `json:"created_at"`
 	LastSeenAt int64  `json:"last_seen_at"`
+	// ModelHealthEnabled 由 HTTP 用户管理视图按 user_settings 填充，不是 users 表字段。
+	ModelHealthEnabled bool `json:"model_health_enabled"`
 }
 
 // HashToken 把明文令牌转成存库用的哈希（hex 编码的 SHA-256）。

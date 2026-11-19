@@ -1,13 +1,14 @@
 // Package media 负责图片的落地与派生。
 //
-// 目录约定（root 由 -misc 指定，默认 ./misc，方便 Docker 单独挂载）：
+// 新图片按会话归档：
 //
-//	<misc>/images/<hash 前两位>/<hash>.<ext>          原图
-//	<misc>/images/<hash 前两位>/<hash>.thumb.jpg      缩略图（给界面用，长边 320）
-//	<misc>/images/<hash 前两位>/<hash>.send.jpg       发送版（给模型用，长边 1024）
+//	<misc>/images/<会话ID>/<图片ID>.<ext>       原图
+//	<misc>/images/<会话ID>/<图片ID>.thumb.jpg   缩略图（长边 320）
+//	<misc>/images/<会话ID>/<图片ID>.send.jpg    发送版（长边 1024）
+//	<misc>/images/unassigned/...               已上传但尚未挂到会话的图片
 //
-// 用内容 sha256 做文件名：同一张图重复上传只占一份空间，URL 也可以放心地
-// 设成 immutable 缓存。
+// 旧版本按内容哈希分桶的文件仍可直接读取，并在程序启动时迁入会话目录。
+// 哈希继续用于内容去重和浏览器缓存校验，不再决定新文件的存放位置。
 package media
 
 import (
@@ -22,6 +23,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	// 注册解码器：png/gif/jpeg 是标准库，webp 只支持解码
@@ -91,9 +93,11 @@ type Saved struct {
 	Height int
 	// HasDerived 表示确实生成了缩略图/发送版（非图片或解码失败时为 false）
 	HasDerived bool
+	// Reused 表示 Save 直接复用了尚未迁移的哈希目录文件。
+	Reused bool
 }
 
-// shardDir 用哈希前两位分桶，避免单目录塞几万个文件。
+// shardDir 是旧版本的哈希分桶目录，保留用于兼容与上传暂存。
 func (s *Store) shardDir(hash string) string {
 	prefix := hash
 	if len(prefix) > 2 {
@@ -112,6 +116,131 @@ func (s *Store) ThumbPath(hash string) string {
 
 func (s *Store) SendPath(hash string) string {
 	return filepath.Join(s.shardDir(hash), hash+".send.jpg")
+}
+
+func (s *Store) conversationDir(convID int64) string {
+	name := "unassigned"
+	if convID > 0 {
+		name = strconv.FormatInt(convID, 10)
+	}
+	return filepath.Join(s.root, "images", name)
+}
+
+func conversationOriginalPath(dir string, id int64, ext string) string {
+	return filepath.Join(dir, strconv.FormatInt(id, 10)+ext)
+}
+
+func conversationThumbPath(dir string, id int64) string {
+	return filepath.Join(dir, strconv.FormatInt(id, 10)+".thumb.jpg")
+}
+
+func conversationSendPath(dir string, id int64) string {
+	return filepath.Join(dir, strconv.FormatInt(id, 10)+".send.jpg")
+}
+
+// Place 把 Save 暂存在哈希目录的一组文件移动到会话目录。
+func (s *Store) Place(id, convID int64, hash, ext string) error {
+	if id <= 0 {
+		return fmt.Errorf("图片 ID 非法")
+	}
+	return s.moveImageSet(id, hash, ext, s.shardDir(hash), s.conversationDir(convID))
+}
+
+// BindToConversation 只移动尚未归属会话的图片；已经在会话目录或仍由旧版本
+// 共享的图片保持原位，避免移动分叉共同引用的文件。
+func (s *Store) BindToConversation(id, convID int64, hash, ext string) error {
+	if convID <= 0 || !fileExists(conversationOriginalPath(s.conversationDir(0), id, ext)) {
+		return nil
+	}
+	return s.moveImageSet(id, hash, ext, s.conversationDir(0), s.conversationDir(convID))
+}
+
+func (s *Store) moveImageSet(id int64, hash, ext, srcDir, dstDir string) error {
+	src := []string{s.OriginalPath(hash, ext), s.ThumbPath(hash), s.SendPath(hash)}
+	if srcDir != s.shardDir(hash) {
+		src = []string{
+			conversationOriginalPath(srcDir, id, ext),
+			conversationThumbPath(srcDir, id),
+			conversationSendPath(srcDir, id),
+		}
+	}
+	dst := []string{
+		conversationOriginalPath(dstDir, id, ext),
+		conversationThumbPath(dstDir, id),
+		conversationSendPath(dstDir, id),
+	}
+	if !fileExists(src[0]) {
+		if fileExists(dst[0]) {
+			return nil
+		}
+		return os.ErrNotExist
+	}
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return err
+	}
+	for i := range src {
+		if !fileExists(src[i]) {
+			continue
+		}
+		if fileExists(dst[i]) {
+			return fmt.Errorf("目标图片已存在: %s", dst[i])
+		}
+		if err := os.Rename(src[i], dst[i]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// LegacyImage 描述一条可从哈希目录迁移的旧附件。
+type LegacyImage struct {
+	ID     int64
+	ConvID int64
+	Hash   string
+	Ext    string
+}
+
+// MigrateLegacy 迁移旧哈希目录；共享附件只迁到最早关联的会话，读取方按图片 ID 查找。
+func (s *Store) MigrateLegacy(images []LegacyImage) (int, error) {
+	migrated := 0
+	var firstErr error
+	for _, img := range images {
+		if !fileExists(s.OriginalPath(img.Hash, img.Ext)) {
+			continue
+		}
+		if err := s.Place(img.ID, img.ConvID, img.Hash, img.Ext); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		migrated++
+	}
+	return migrated, firstErr
+}
+
+func (s *Store) OriginalPathByID(id int64, hash, ext string) string {
+	matches, _ := filepath.Glob(filepath.Join(s.root, "images", "*", strconv.FormatInt(id, 10)+ext))
+	if len(matches) > 0 {
+		return matches[0]
+	}
+	return s.OriginalPath(hash, ext)
+}
+
+func (s *Store) ThumbPathByID(id int64, hash string) string {
+	matches, _ := filepath.Glob(filepath.Join(s.root, "images", "*", strconv.FormatInt(id, 10)+".thumb.jpg"))
+	if len(matches) > 0 {
+		return matches[0]
+	}
+	return s.ThumbPath(hash)
+}
+
+func (s *Store) SendPathByID(id int64, hash string) string {
+	matches, _ := filepath.Glob(filepath.Join(s.root, "images", "*", strconv.FormatInt(id, 10)+".send.jpg"))
+	if len(matches) > 0 {
+		return matches[0]
+	}
+	return s.SendPath(hash)
 }
 
 // Exists 判断这份内容是否已经落过盘（去重用）。
@@ -166,6 +295,7 @@ func (s *Store) Save(r io.Reader, _ string) (*Saved, error) {
 	if s.Exists(hash) {
 		saved, err := s.inspectExisting(hash)
 		if err == nil {
+			saved.Reused = true
 			return saved, nil
 		}
 		// 探测失败就当作新文件重走一遍
@@ -337,12 +467,16 @@ func fit(w, h, maxEdge int) (int, int) {
 	return nw, maxEdge
 }
 
-// Open 打开原图。
+// Open 打开旧哈希路径的原图。
 func (s *Store) Open(hash, ext string) (*os.File, error) {
 	return os.Open(s.OriginalPath(hash, ext))
 }
 
-// OpenThumb 打开缩略图；没生成过就退回原图。
+func (s *Store) OpenByID(id int64, hash, ext string) (*os.File, error) {
+	return os.Open(s.OriginalPathByID(id, hash, ext))
+}
+
+// OpenThumb 打开旧哈希路径的缩略图；没生成过就退回原图。
 func (s *Store) OpenThumb(hash, ext string) (*os.File, string, error) {
 	if p := s.ThumbPath(hash); fileExists(p) {
 		f, err := os.Open(p)
@@ -352,14 +486,30 @@ func (s *Store) OpenThumb(hash, ext string) (*os.File, string, error) {
 	return f, "", err
 }
 
-// OpenForModel 打开「发给模型用」的那份；优先发送版，其次原图。
-// 返回字节、MIME、以及是否用了发送版。
+func (s *Store) OpenThumbByID(id int64, hash, ext string) (*os.File, string, error) {
+	if p := s.ThumbPathByID(id, hash); fileExists(p) {
+		f, err := os.Open(p)
+		return f, "image/jpeg", err
+	}
+	f, err := s.OpenByID(id, hash, ext)
+	return f, "", err
+}
+
+// OpenForModel 打开旧哈希路径的发送版或原图。
 func (s *Store) OpenForModel(hash, ext, mime string) ([]byte, string, error) {
-	if p := s.SendPath(hash); fileExists(p) {
-		b, err := os.ReadFile(p)
+	return openForModel(s.SendPath(hash), s.OriginalPath(hash, ext), ext, mime)
+}
+
+func (s *Store) OpenForModelByID(id int64, hash, ext, mime string) ([]byte, string, error) {
+	return openForModel(s.SendPathByID(id, hash), s.OriginalPathByID(id, hash, ext), ext, mime)
+}
+
+func openForModel(sendPath, originalPath, ext, mime string) ([]byte, string, error) {
+	if fileExists(sendPath) {
+		b, err := os.ReadFile(sendPath)
 		return b, "image/jpeg", err
 	}
-	b, err := os.ReadFile(s.OriginalPath(hash, ext))
+	b, err := os.ReadFile(originalPath)
 	if err != nil {
 		return nil, "", err
 	}

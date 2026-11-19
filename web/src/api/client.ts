@@ -26,6 +26,7 @@ import type {
   MemorySettingsResponse,
   Message,
   Model,
+  ModelHealthResponse,
   Provider,
   ProviderModelsFetchResponse,
   ProviderTestResponse,
@@ -314,11 +315,13 @@ const UPLOAD_PATH = '/api/uploads'
 export async function uploadAttachments(
   files: File[],
   options: RequestOptions = {},
+  convId?: number,
 ): Promise<Attachment[]> {
   if (!Array.isArray(files) || files.length === 0) return []
 
   const form = new FormData()
   for (const file of files) form.append(UPLOAD_FIELD, file)
+  if (convId && convId > 0) form.append('conv_id', String(convId))
 
   const init: RequestInit = {
     method: 'POST',
@@ -393,6 +396,8 @@ export const api = {
     http.post<{ user: UserInfo; token: string }>('/api/users', { name }, options),
   rotateUserToken: (id: number, options?: RequestOptions) =>
     http.post<{ token: string }>(`/api/users/${id}/token`, undefined, options),
+  setUserModelHealth: (id: number, enabled: boolean, options?: RequestOptions) =>
+    http.put<{ enabled: boolean }>(`/api/users/${id}/model-health`, { enabled }, options),
   deleteUser: (id: number, options?: RequestOptions) => http.delete<void>(`/api/users/${id}`, options),
 
   /* 那条唯一的 SSE 长连接 */
@@ -445,6 +450,11 @@ export const api = {
       '/api/models',
       providerId === undefined ? options : { ...options, query: { ...options?.query, provider_id: providerId } },
     ),
+  getModelHealth: (options?: RequestOptions) => http.get<ModelHealthResponse>('/api/model-health', options),
+  getModelHealthConcurrency: (options?: RequestOptions) =>
+    http.get<{ concurrency: number }>('/api/model-health/concurrency', options),
+  setModelHealthConcurrency: (concurrency: number, options?: RequestOptions) =>
+    http.put<{ concurrency: number }>('/api/model-health/concurrency', { concurrency }, options),
 
   /* 会话 */
   listConversations: (options?: RequestOptions) => http.get<Conversation[]>('/api/conversations', options),

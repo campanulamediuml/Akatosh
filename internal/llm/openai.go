@@ -76,6 +76,44 @@ func buildChatBody(req ChatRequest, withEffort, withTools, withStreamOpts bool) 
 	return body
 }
 
+type contentPartWithRequiredText struct {
+	Type     string    `json:"type"`
+	Text     string    `json:"text"`
+	ImageURL *ImageURL `json:"image_url,omitempty"`
+}
+
+func hasImageParts(messages []ChatMessage) bool {
+	for _, msg := range messages {
+		parts, ok := msg.Content.([]ContentPart)
+		if !ok {
+			continue
+		}
+		for _, part := range parts {
+			if part.Type == "image_url" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func requireTextOnContentParts(req ChatRequest) ChatRequest {
+	out := req
+	out.Messages = append([]ChatMessage(nil), req.Messages...)
+	for i, msg := range out.Messages {
+		parts, ok := msg.Content.([]ContentPart)
+		if !ok {
+			continue
+		}
+		converted := make([]contentPartWithRequiredText, len(parts))
+		for j, part := range parts {
+			converted[j] = contentPartWithRequiredText{Type: part.Type, Text: part.Text, ImageURL: part.ImageURL}
+		}
+		out.Messages[i].Content = converted
+	}
+	return out
+}
+
 // Stream 发起流式对话请求，返回事件通道。
 // 上游返回非 2xx 时同步返回 error（这样调用方能立刻把鉴权失败告诉用户），
 // 否则在后台 goroutine 里持续解析。
@@ -84,11 +122,25 @@ func buildChatBody(req ChatRequest, withEffort, withTools, withStreamOpts bool) 
 // 工具声明重试成功 —— 调用方可以据此提示「这家上游不支持工具调用」。
 //
 // 兼容性兜底：上游因为不认识 reasoning_effort / tools / stream_options
-// 返回 400 时，会自动去掉对应参数重试一次 —— 很多网关对未知字段是直接报错的。
+// 返回 400 时，会自动去掉对应参数重试一次；部分视觉网关要求图片块也带 text，
+// 对明确的 422 missing field text 会保留图片并补字段重试。
 func (c *Client) Stream(ctx context.Context, req ChatRequest) (<-chan Event, bool, error) {
 	resp, err := c.do(ctx, "/chat/completions", buildChatBody(req, true, true, true))
 	if err != nil {
 		return nil, false, err
+	}
+	if resp.StatusCode == http.StatusUnprocessableEntity && hasImageParts(req.Messages) {
+		body := readBody(resp)
+		resp.Body.Close()
+		if !strings.Contains(body, "missing field `text`") {
+			return nil, false, &APIError{Status: http.StatusUnprocessableEntity, Body: body}
+		}
+		log.Printf("[llm] 上游要求图片内容块包含 text（model=%s），已补空字段重试", req.Model)
+		req = requireTextOnContentParts(req)
+		resp, err = c.do(ctx, "/chat/completions", buildChatBody(req, true, true, true))
+		if err != nil {
+			return nil, false, err
+		}
 	}
 	if resp.StatusCode == http.StatusBadRequest && req.Effort != "" {
 		body := readBody(resp)

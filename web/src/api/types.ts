@@ -109,13 +109,28 @@ export interface UserInfo {
   is_admin: boolean
   created_at: number
   last_seen_at: number
+  /** 是否为此用户开启每分钟模型可达性检测 */
+  model_health_enabled?: boolean
+}
+
+export interface ModelHealthStatus {
+  ok: boolean
+  checked_at: number
+  latency_ms: number
+  error?: string
+}
+
+export interface ModelHealthResponse {
+  enabled: boolean
+  /** 键与 modelKey 相同：`${provider_id}:${model_id}`；没有记录 = 等待首次检测 */
+  models: Record<string, ModelHealthStatus>
 }
 
 export interface SettingsResponse {
   /** 与 GET /api/providers 相同，省一次请求；按 id 升序 */
   providers: Provider[]
   defaults: SettingsDefaults
-  /** 后端是否配置了搜索后端（-searxng）；false 时前端隐藏「联网」开关 */
+  /** 后端是否配置了任意搜索后端；false 时前端隐藏「联网」开关 */
   web_search_available?: boolean
   /** 上下文压缩阈值（0~1，0 = 禁用）；进度条详情里展示「达到 X% 触发自动压缩」 */
   compact_threshold?: number
@@ -289,7 +304,7 @@ export interface Conversation {
   unread: boolean
   /** 最近一次被查看的时间戳（Unix 毫秒） */
   last_read_at: number
-  /** 联网搜索开关：开启后生成时模型可自主调用 web_search 工具 */
+  /** 联网搜索开关：开启后生成时模型可自主调用部署时配置的搜索工具 */
   web_search: boolean
 }
 
@@ -395,7 +410,7 @@ export interface Message {
   model_id: string
   effort: string
   error: string
-  /** 本轮联网搜索的记录（JSON 数组：[{query, results:[{title,url}], error?}]），空串 = 没搜 */
+  /** 本轮联网搜索的记录（JSON 数组：[{provider?, query, results:[{title,url}], error?}]），空串 = 没搜 */
   search_log: string
   usage: Usage
   /** 工具循环各段流各自的 usage（有工具调用的消息才有）；usage 字段是累计成本口径 */

@@ -13,13 +13,17 @@ import (
 	_ "modernc.org/sqlite" // 纯 Go 驱动，无需 CGO
 )
 
-// Store 封装 SQLite。全局只开一条连接：单用户本地应用不需要并发写，
-// 这样可以从根上避免 SQLITE_BUSY，代价可以忽略（每次读写都在亚毫秒级）。
+// Store 封装 SQLite / MySQL。全局只开一条连接，保持原有事务与备份语义。
 type Store struct {
-	db   *sql.DB
+	db   *compatDB
 	path string
 	mu   sync.Mutex
 }
+
+func (s *Store) IsMySQL() bool { return s.db.dialect == dialectMySQL }
+
+// SQLDB 暴露共享连接给记忆 sidecar；调用方不得关闭它。
+func (s *Store) SQLDB() *sql.DB { return s.db.DB }
 
 func NowMs() int64 { return time.Now().UnixMilli() }
 
@@ -36,13 +40,14 @@ func Open(path string) (*Store, error) {
 		"&_pragma=synchronous(NORMAL)" +
 		"&_pragma=foreign_keys(1)"
 
-	db, err := sql.Open("sqlite", dsn)
+	rawDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("打开数据库失败: %w", err)
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(0)
+	rawDB.SetMaxOpenConns(1)
+	rawDB.SetMaxIdleConns(1)
+	rawDB.SetConnMaxLifetime(0)
+	db := &compatDB{DB: rawDB, dialect: dialectSQLite}
 
 	if err := db.Ping(); err != nil {
 		db.Close()
@@ -489,7 +494,7 @@ func (s *Store) MarkInterrupted() (int64, error) {
 // ---------- settings ----------
 
 // GetSetting 读某个用户的设置项（user_settings 表，按用户隔离）。
-// userID <= 0 时读单租户时代的全局 settings 表（仅供迁移期代码使用）。
+// userID <= 0 时读写全局 settings 表（系统配置及单租户迁移数据）。
 func (s *Store) GetSetting(userID int64, key string) (string, error) {
 	var v string
 	var err error

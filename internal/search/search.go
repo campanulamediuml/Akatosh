@@ -1,5 +1,5 @@
-// Package search 是联网搜索工具的执行端：调 SearXNG 的 JSON API，
-// 把结果修剪成适合喂给模型的形态，并给出 web_search 的工具声明。
+// Package search 把 SearXNG、Tavily 和 Serper 的响应修剪成统一结果，
+// 供联网搜索工具和消息里的来源记录复用。
 package search
 
 import (
@@ -20,10 +20,10 @@ const (
 	// maxResults 是喂给模型的结果条数上限。再多只会稀释上下文、
 	// 拖垮前缀缓存命中率，对回答质量没有帮助。
 	maxResults = 6
-	// maxContentRunes 是单条摘要的长度上限（SearXNG 给的引擎摘要本身不长，
+	// maxContentRunes 是单条摘要的长度上限（搜索后端的摘要本身通常不长，
 	// 但个别站点会塞整段正文）。
 	maxContentRunes = 300
-	// ToolName 是工具名，session 按它识别「这是搜索调用」。
+	// ToolName 是原 SearXNG 单工具配置使用的名字。
 	ToolName = "web_search"
 )
 
@@ -37,9 +37,10 @@ type Result struct {
 // Record 是「本轮搜过什么」的持久摘要，落库到消息的 search_log 给界面展示。
 // 刻意不存 content：那只是引擎摘要，占地方且没有复看价值；标题 + 链接足够。
 type Record struct {
-	Type    string `json:"type"` // 固定 "search"，和 Python 执行记录（"python"）区分
-	Query   string `json:"query"`
-	Results []struct {
+	Type     string `json:"type"` // 固定 "search"，和 Python 执行记录（"python"）区分
+	Provider string `json:"provider,omitempty"`
+	Query    string `json:"query"`
+	Results  []struct {
 		Title string `json:"title"`
 		URL   string `json:"url"`
 	} `json:"results"`

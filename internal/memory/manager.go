@@ -13,7 +13,7 @@ import (
 	"aiassistant/internal/store"
 )
 
-// Manager 管理每用户独立的记忆数据库和文件树。主库只读，不做任何 schema 变更。
+// Manager 管理每用户隔离的记忆记录和文件树；SQLite 用 sidecar，MySQL 用统一表。
 type Manager struct {
 	main *store.Store
 	root string
@@ -38,6 +38,12 @@ func NewManager(main *store.Store, root string) (*Manager, error) {
 	if err := os.MkdirAll(filepath.Join(abs, "users"), 0o700); err != nil {
 		return nil, err
 	}
+	if main.IsMySQL() {
+		u := &userStore{db: main.SQLDB(), mysql: true, shared: true}
+		if err := u.migrateMySQL(); err != nil {
+			return nil, err
+		}
+	}
 	return &Manager{main: main, root: abs, users: map[int64]*userStore{}, running: map[int64]bool{}}, nil
 }
 
@@ -50,7 +56,13 @@ func (m *Manager) user(userID int64) (*userStore, error) {
 	if u := m.users[userID]; u != nil {
 		return u, nil
 	}
-	u, err := openUserStore(m.root, userID)
+	var u *userStore
+	var err error
+	if m.main.IsMySQL() {
+		u, err = openUserStoreMySQL(m.main.SQLDB(), m.root, userID)
+	} else {
+		u, err = openUserStore(m.root, userID)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -320,6 +332,13 @@ func (m *Manager) DeleteUser(userID int64) error {
 		delete(m.users, userID)
 	}
 	m.mu.Unlock()
+	if m.main.IsMySQL() {
+		for _, table := range []string{"memory_session_states", "memory_maintenance", "memory_settings"} {
+			if _, err := m.main.SQLDB().Exec(`DELETE FROM `+table+` WHERE user_id=?`, userID); err != nil {
+				return err
+			}
+		}
+	}
 	root := m.UserRoot(userID)
 	rel, err := filepath.Rel(filepath.Join(m.root, "users"), root)
 	if err != nil || rel != strconv.FormatInt(userID, 10) {

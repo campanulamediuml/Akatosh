@@ -345,3 +345,58 @@ func TestSaveIsReasonablyFast(t *testing.T) {
 		t.Fatalf("太慢了: %v", elapsed)
 	}
 }
+
+func TestConversationPathsBindingAndLegacyMigration(t *testing.T) {
+	s := newTestStore(t)
+	raw := makeNoisyPNG(t, 1600, 1200)
+	saved, err := s.Save(bytes.NewReader(raw), "conversation.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Place(42, 7, saved.Hash, saved.Ext); err != nil {
+		t.Fatalf("移动到会話目录失败: %v", err)
+	}
+	wantOriginal := filepath.Join(s.Root(), "images", "7", "42.png")
+	if !fileExists(wantOriginal) || fileExists(s.OriginalPath(saved.Hash, saved.Ext)) {
+		t.Fatalf("原图没有落到会话路径: %s", wantOriginal)
+	}
+	if got := s.OriginalPathByID(42, saved.Hash, saved.Ext); got != wantOriginal {
+		t.Fatalf("按 ID 解析原图路径不对: %s", got)
+	}
+	if !fileExists(filepath.Join(s.Root(), "images", "7", "42.thumb.jpg")) ||
+		!fileExists(filepath.Join(s.Root(), "images", "7", "42.send.jpg")) {
+		t.Fatal("派生图没有跟随原图移动")
+	}
+	f, err := s.OpenByID(42, saved.Hash, saved.Ext)
+	if err != nil {
+		t.Fatalf("新路径读不到原图: %v", err)
+	}
+	f.Close()
+
+	pending, err := s.Save(bytes.NewReader(makePNG(t, 300, 200, false)), "pending.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Place(43, 0, pending.Hash, pending.Ext); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.BindToConversation(43, 8, pending.Hash, pending.Ext); err != nil {
+		t.Fatalf("未发送图片绑定会话失败: %v", err)
+	}
+	if !fileExists(filepath.Join(s.Root(), "images", "8", "43.png")) ||
+		fileExists(filepath.Join(s.Root(), "images", "unassigned", "43.png")) {
+		t.Fatal("未发送图片没有从 unassigned 移到会话目录")
+	}
+
+	legacy, err := s.Save(bytes.NewReader(makeJPEG(t, 800, 600)), "legacy.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.MigrateLegacy([]LegacyImage{{ID: 44, ConvID: 9, Hash: legacy.Hash, Ext: legacy.Ext}})
+	if err != nil || n != 1 {
+		t.Fatalf("旧图片迁移失败: n=%d err=%v", n, err)
+	}
+	if !fileExists(filepath.Join(s.Root(), "images", "9", "44.jpg")) {
+		t.Fatal("旧图片没有迁到会话目录")
+	}
+}

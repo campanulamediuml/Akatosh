@@ -169,10 +169,12 @@ const (
 
 // 设置项 key
 const (
-	SettingDefaultProvider     = "default_provider_id"
-	SettingDefaultModel        = "default_model_id"
-	SettingDefaultEffort       = "default_effort"
-	SettingDefaultSystemPrompt = "default_system_prompt"
+	SettingDefaultProvider        = "default_provider_id"
+	SettingDefaultModel           = "default_model_id"
+	SettingDefaultEffort          = "default_effort"
+	SettingDefaultSystemPrompt    = "default_system_prompt"
+	SettingModelHealthEnabled     = "model_health_enabled"
+	SettingModelHealthConcurrency = "model_health_concurrency"
 )
 
 // 默认值

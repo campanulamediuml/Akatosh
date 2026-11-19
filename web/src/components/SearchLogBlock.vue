@@ -18,6 +18,7 @@ import { formatNumber } from '@/utils/format'
 
 interface SearchEntry {
   type?: string // 'search'；历史数据没有 type 字段，缺省视为搜索
+  provider?: 'Tavily' | 'Google' | 'SearXNG'
   query: string
   results?: { title: string; url: string }[]
   error?: string
@@ -106,7 +107,9 @@ function labelOf(e: ToolEntry): string {
   if (isPython(e)) return '执行了 Python'
   if (isFile(e)) return `读取了文件「${e.name}」`
   if (isMemory(e)) return `读取了 Session #${e.session_id} 的记忆`
-  return `搜索了「${(e as SearchEntry).query}」`
+  const entry = e as SearchEntry
+  const provider = entry.provider ? `${entry.provider} ` : ''
+  return `${provider}搜索了「${entry.query}」`
 }
 
 /** 这段请求的 prompt tokens（展示口径：这一段实际多大；累计成本在消息底部） */

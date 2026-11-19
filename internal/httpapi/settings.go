@@ -336,7 +336,7 @@ func (s *Server) settingsView(userID int64) (map[string]any, error) {
 	return map[string]any{
 		"providers": providerViews(list),
 		"defaults":  defaults,
-		// 联网搜索是否可用（启动时配了 -searxng 才为 true），前端据此显示开关
+		// 配置了 Tavily、Serper 或 SearXNG 任一搜索后端即可用，前端据此显示开关
 		"web_search_available": s.mgr.SearchAvailable(),
 		// 上下文压缩阈值（前端在进度条详情里展示「达到 X% 触发自动压缩」）
 		"compact_threshold": s.mgr.CompactThreshold(),

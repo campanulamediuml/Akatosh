@@ -328,7 +328,7 @@ async function upload(item: PendingImage): Promise<void> {
     try {
       const prepared = await prepareForUpload(item)
       if (controller.signal.aborted) return
-      const list = await uploadAttachments([prepared], { signal: controller.signal })
+      const list = await uploadAttachments([prepared], { signal: controller.signal }, chat.conv?.id)
       const att = list[0]
       if (!att || typeof att.id !== 'number') throw new Error('服务端没有返回附件信息')
       item.attachment = att

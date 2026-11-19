@@ -288,6 +288,28 @@ const freshToken = ref<{ label: string; token: string } | null>(null)
 const confirmUserDeleteId = ref<number | null>(null)
 const rotatingUserId = ref<number | null>(null)
 const deletingUserId = ref<number | null>(null)
+const modelHealthSavingUserId = ref<number | null>(null)
+
+async function onToggleModelHealth(id: number, enabled: boolean): Promise<void> {
+  if (modelHealthSavingUserId.value !== null) return
+  modelHealthSavingUserId.value = id
+  try {
+    await settings.setUserModelHealth(id, enabled)
+  } finally {
+    modelHealthSavingUserId.value = null
+  }
+}
+
+async function onToggleOwnModelHealth(): Promise<void> {
+  const id = settings.me?.id
+  if (id) await onToggleModelHealth(id, !settings.modelHealthEnabled)
+}
+
+async function onModelHealthConcurrencyChange(e: Event): Promise<void> {
+  const value = Number((e.target as HTMLInputElement).value)
+  const res = await settings.saveModelHealthConcurrency(value)
+  if (!res.ok) controlsEpoch.value += 1
+}
 
 async function onCreateUser(): Promise<void> {
   const name = newUserName.value.trim()
@@ -384,7 +406,7 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onDocKeydown))
 </script>
 
 <template>
-  <div v-if="open" class="modal" @click.self="emit('close')">
+  <div v-if="open" class="modal">
     <div class="modal__panel" role="dialog" aria-modal="true" aria-label="设置">
       <header class="modal__head">
         <span class="modal__title">设置</span>
@@ -722,6 +744,52 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onDocKeydown))
         </section>
 
         <section class="fieldset">
+          <div class="fieldset__legend">模型检测</div>
+          <div class="fieldset__actions">
+            <button
+              type="button"
+              class="memory-switch"
+              :class="{ 'memory-switch--on': settings.modelHealthEnabled }"
+              :aria-pressed="settings.modelHealthEnabled"
+              :disabled="!settings.me || modelHealthSavingUserId !== null"
+              @click="onToggleOwnModelHealth"
+            >
+              <span class="memory-switch__track" aria-hidden="true"><span /></span>
+              {{ modelHealthSavingUserId === settings.me?.id ? '保存中…' : '每分钟模型检测' }}
+            </button>
+          </div>
+          <p class="hint" style="margin: 0">
+            开启后，每分钟向自己注册的每个模型发送一次「测试」，会消耗少量上游 API Token。颜色会显示在右下角当前模型及模型列表中。
+          </p>
+          <div class="model-health-legend" aria-label="模型检测状态颜色说明">
+            <span class="model-health-legend--ok">绿色：正常</span>
+            <span class="model-health-legend--error">红色：失败</span>
+            <span class="model-health-legend--pending">灰色：等待检测</span>
+          </div>
+          <template v-if="settings.isAdmin">
+            <div class="field">
+              <label class="label" for="model-health-concurrency">全局检测并发数（管理员）</label>
+              <input
+                id="model-health-concurrency"
+                class="input"
+                style="max-width: 180px"
+                type="number"
+                min="1"
+                max="64"
+                step="1"
+                :key="`health-c-${controlsEpoch}`"
+                :value="settings.modelHealthConcurrency"
+                :disabled="settings.savingModelHealthConcurrency"
+                @change="onModelHealthConcurrencyChange"
+              />
+            </div>
+            <p class="hint" style="margin: 0">
+              所有开启检测的用户共享同一个全局 worker 池，范围 1–64；修改后从下一轮检测开始生效。
+            </p>
+          </template>
+        </section>
+
+        <section class="fieldset">
           <div class="fieldset__legend">后台任务与记忆</div>
           <p class="hint" style="margin: 0 0 12px">
             起标题和记忆归档统一使用这里的供应商、模型与思考等级；留空则跟随当前 Session。记忆每天 04:00 整理，次日生效。
@@ -810,6 +878,17 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onDocKeydown))
               <div class="prov__actions">
                 <button
                   type="button"
+                  class="memory-switch"
+                  :class="{ 'memory-switch--on': u.model_health_enabled }"
+                  :disabled="modelHealthSavingUserId !== null"
+                  :title="u.model_health_enabled ? '关闭每分钟模型可达性检测' : '开启后每分钟向每个模型发送一次「测试」'"
+                  @click="onToggleModelHealth(u.id, !u.model_health_enabled)"
+                >
+                  <span class="memory-switch__track" aria-hidden="true"><span /></span>
+                  {{ modelHealthSavingUserId === u.id ? '保存中…' : '模型检测' }}
+                </button>
+                <button
+                  type="button"
                   class="btn btn--sm"
                   :disabled="rotatingUserId !== null"
                   title="旧令牌立即失效，新令牌只显示一次"
@@ -884,6 +963,25 @@ onBeforeUnmount(() => document.removeEventListener('keydown', onDocKeydown))
 /* 多供应商列表比原来的单表单宽，稍微放宽一点面板 */
 .modal__panel {
   max-width: 760px;
+}
+
+.model-health-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-4);
+  font-size: var(--fs-xs);
+}
+
+.model-health-legend--ok {
+  color: var(--success);
+}
+
+.model-health-legend--error {
+  color: var(--danger);
+}
+
+.model-health-legend--pending {
+  color: var(--text-faint);
 }
 
 .prov--form {
